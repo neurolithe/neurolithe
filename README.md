@@ -1,33 +1,31 @@
-<div align="center">
-  <h1>🧠 NeuroLithe</h1>
-  <p><strong>A fast, embedded, and efficient contextual memory database for AI agents.</strong></p>
-  <p>🌐 <a href="https://neurolithe.com">neurolithe.com</a></p>
-</div>
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="content/image/neurolithe-logo-full.png">
+    <img width="500" alt="NeuroLithe" src="content/image/neurolithe-logo-full.png">
+  </picture>
+</p>
 
-<hr/>
+<p align="center">
+  <b>A fast, embedded, and efficient contextual memory database for AI agents.</b>
+</p>
 
-## 🎯 Goal of the Project
+<p align="center">
+  <a href="https://github.com/neurolithe/neurolithe/actions"><img src="https://img.shields.io/github/actions/workflow/status/neurolithe/neurolithe/ci.yml?branch=master&color=cyan" alt="Build Status"></a>
+  <a href="https://github.com/neurolithe/neurolithe/releases"><img src="https://img.shields.io/github/v/release/neurolithe/neurolithe?color=cyan" alt="Release"></a>
+  <a href="https://github.com/neurolithe/neurolithe/blob/master/LICENSE"><img src="https://img.shields.io/badge/License-MIT-cyan.svg" alt="License"></a>
+  <a href="https://docs.neurolithe.com"><img src="https://img.shields.io/badge/docs-neurolithe.com-cyan.svg" alt="Docs"></a>
+  <a href="https://neurolithe.com"><img src="https://img.shields.io/badge/website-neurolithe.com-cyan.svg" alt="Website"></a>
+</p>
 
-NeuroLithe is designed to solve the **context memory problem** for AI agents. By providing both **short-term and long-term memory**, it allows AI systems to recall past interactions without needing to inject the entire conversation history into the prompt.
+**NeuroLithe** is built in 🦀 Rust to solve the **context memory problem** for AI agents. By providing both strictly managed **short-term memory** (STM) and unbounded, highly-retrievable **long-term memory** (LTM) via hybrid vector/keyword search, it allows intelligent systems to recall past interactions without drowning the LLM prompt in full conversation history.
 
-**Key Benefits:**
+<p align="center">
+<strong><a href="#-quick-start">Quick Start</a> • <a href="#-features">Features</a> • <a href="#-tech-stack">Tech Stack</a> • <a href="#-contributing">Contributing</a> • <a href="https://docs.neurolithe.com">Documentation</a></strong>
+</p>
 
-- 📉 **Lower LLM Costs:** Minimize token usage by passing only the most relevant, retrieved information to the LLM during communication.
-- ⚡ **Increased Efficiency:** Give the AI exactly the right amount of context it needs to perform tasks effectively, avoiding context window limits and reducing hallucinations.
-- 🗄️ **Seamless Integration:** Runs locally as an embedded database, meaning zero external infrastructure to manage.
+## 🚀 Quick Start
 
-## 🛠️ Tech Stack
-
-NeuroLithe is built for speed, safety, and conciseness using modern technologies:
-
-- **Language:** [Rust](https://www.rust-lang.org/) — Ensuring memory safety, high performance, and fearless concurrency.
-- **Database:** [SQLite](https://sqlite.org/) + `rusqlite` — Fast, file-based SQL database optimized with WAL mode.
-- **Vector Search:** `sqlite-vec` & FTS5 — Powering hybrid search (semantic vector embeddings + BM25 full-text search) natively in SQL.
-- **Async Runtime:** `tokio` — Handling concurrent operations efficiently.
-- **LLM Integration:** `reqwest` & `serde` — For fast asynchronous communication with OpenAI to generate text embeddings and extract factual models.
-- **Protocol:** [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) — Operating seamlessly as an intelligent MCP server over standard input/output (STDIO).
-
-## 🚀 Quick Install
+### 1. Installation
 
 **macOS / Linux:**
 
@@ -41,19 +39,26 @@ curl -fsSL https://raw.githubusercontent.com/neurolithe/neurolithe/main/install.
 irm https://raw.githubusercontent.com/neurolithe/neurolithe/main/install.ps1 | iex
 ```
 
-This automatically downloads the binary, creates config files, prompts for your API key, and generates a ready-to-paste MCP config.
+> [!NOTE]
+> This automatically downloads the latest binary, creates config files, prompts for your LLM API key, and provides a ready-to-use MCP configuration snippet.
 
-### From Source
+<details>
+<summary><b>Install from source</b></summary>
+<br>
+
+Ensure you have [Rust](https://rustup.rs/) installed:
 
 ```bash
 git clone https://github.com/neurolithe/neurolithe.git
 cd neurolithe
-cargo build --release
+cargo install --path .
 ```
 
-### Connect to Your AI Agent
+</details>
 
-Add NeuroLithe to your MCP client (Claude Desktop, Cursor, etc.):
+### 2. Connect to Your AI Agent
+
+Add NeuroLithe to your MCP client (*Claude Desktop, Cursor, etc.*). The install script generates exactly this config for you at `~/.neurolithe/mcp-config.json` — simply copy and paste it into your client configurations.
 
 ```json
 {
@@ -69,24 +74,41 @@ Add NeuroLithe to your MCP client (Claude Desktop, Cursor, etc.):
 }
 ```
 
-> 💡 The install script generates this config at `~/.neurolithe/mcp-config.json` — just copy and paste it.
+## ✨ Features
 
-### Configuration
+- 📉 **Lower LLM Costs:** Minimize token usage by passing only the most relevant, retrieved information to the LLM during communication.
+- ⚡ **Increased Efficiency:** Give the AI exactly the right amount of context it needs to perform tasks effectively, avoiding context window limits and reducing hallucinations.
+- 🧠 **Hybrid Storage Model:**
+  - **Short-Term Memory (STM):** Tracks recent, relevant dialogue. High priority for task context.
+  - **Long-Term Memory (LTM):** As STM fills up, old interactions are *compressed* into long-term factual nodes using SQLite + semantic vector embeddings (`sqlite-vec`).
+- 🗄️ **Seamless Integration:** Runs locally as an embedded database, meaning zero external infrastructure to manage.
+- ⏱️ **Adaptive Forgetting Curve:** Simulates human memory dynamics. Unused or unimportant factual nodes gradually decay over time unless reinforced.
 
-See `~/.neurolithe/neurolithe.toml` (or the [Configuration docs](https://docs.neurolithe.com/configuration.html)) for all options.
+## 🛠️ Tech Stack
 
-**📖 Full documentation:** [docs.neurolithe.com](https://docs.neurolithe.com)
+NeuroLithe is built for speed, safety, and conciseness using modern technologies:
+
+- **Language:** [Rust](https://www.rust-lang.org/) — Ensuring memory safety, high performance, and fearless concurrency.
+- **Database:** [SQLite](https://sqlite.org/) + `rusqlite` — Fast, file-based SQL database optimized with WAL mode.
+- **Vector Search:** `sqlite-vec` & FTS5 — Powering hybrid search (semantic vector embeddings + BM25 full-text search) natively in SQL.
+- **Async Runtime:** `tokio` — Handling concurrent operations efficiently.
+- **LLM Integration:** `reqwest` & `serde` — For fast asynchronous communication with OpenAI to generate text embeddings and extract factual models.
+- **Protocol:** [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) — Operating seamlessly as an intelligent MCP server over standard input/output (STDIO).
 
 ## 🤝 Contributing
 
 We welcome contributions! NeuroLithe is built using **Domain-Driven Design (DDD)**. To keep the project clean, scalable, and testable, contributors must adhere to this architectural pattern.
 
-### Project Structure (DDD)
+<details>
+<summary><b>View Project Architecture Overview</b></summary>
+<br>
 
 - **`src/domain/`**: The core of the application. Contains business models, logic (e.g., decay math), and interfaces (`ports`). Zero external networking or database logic belongs here.
 - **`src/infrastructure/`**: Concrete implementations of the `ports`. This is where `rusqlite` database connections, `reqwest` LLM clients, and raw SQL schemas live.
 - **`src/application/`**: Use cases and orchestrators (like `RetrievalService` or `SleepWorker`). This layer wires the domain and infrastructure together.
 - **`src/interfaces/`**: The outer boundary. Contains the MCP server, JSON-RPC parsing, and STDIO handlers.
+
+</details>
 
 ### Contribution Guidelines
 
@@ -95,14 +117,9 @@ We welcome contributions! NeuroLithe is built using **Domain-Driven Design (DDD)
 
    ```bash
    git checkout -b feature/your-feature-name
-   # or
-   git checkout -b fix/issue-description
    ```
 
-3. **Pull Requests:**
-   - Fork the repository.
-   - Push your feature branch to your fork.
-   - Open a Pull Request outlining *what* changed and *why*. Ensure all tests pass (`cargo test`) before requesting a review.
+3. **Pull Requests:** Open a Pull Request outlining *what* changed and *why*. Ensure all tests pass (`cargo test`) before requesting a review.
 
 ## 📝 License
 
