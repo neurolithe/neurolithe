@@ -15,16 +15,16 @@ impl DecayEngine {
         current_score * 0.5f64.powf(days_elapsed / self.half_life_days)
     }
 
-    /// Apply decay to a specific node, returning the modified node 
+    /// Apply decay to a specific node, returning the modified node
     /// If score drops below threshold (e.g. 0.1), status becomes 'archived'
     pub fn apply_to_node(&self, mut node: MemoryNode, days_elapsed: f64) -> MemoryNode {
         let new_score = self.calculate_decay(node.relevance_score, days_elapsed);
         node.relevance_score = new_score;
-        
+
         if new_score < 0.1 && node.status == "active" {
             node.status = "archived".into();
         }
-        
+
         node
     }
 }
@@ -32,16 +32,16 @@ impl DecayEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::models::{TenantId, SessionId};
+    use crate::domain::models::TenantId;
     use serde_json::json;
 
     #[test]
     fn test_decay_calculation() {
         let engine = DecayEngine::new(7.0); // 7 day half-life
-        
+
         let score = engine.calculate_decay(1.0, 7.0);
         assert!((score - 0.5).abs() < 0.001);
-        
+
         let score_14 = engine.calculate_decay(1.0, 14.0);
         assert!((score_14 - 0.25).abs() < 0.001);
     }
@@ -49,7 +49,7 @@ mod tests {
     #[test]
     fn test_node_archiving() {
         let engine = DecayEngine::new(7.0);
-        
+
         let node = MemoryNode {
             id: None,
             tenant_id: TenantId("t1".into()),

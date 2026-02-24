@@ -1,10 +1,10 @@
-use crate::domain::models::{Episode, MemoryNode, MemoryResult, SessionId, TenantId, TimeFilter};
 use crate::application::retrieval::RetrievalService;
+use crate::application::session_manager::{ContextWindow, SessionManager};
 use crate::application::sleep::SleepWorker;
-use crate::application::session_manager::{SessionManager, ContextWindow};
+use crate::domain::models::{Episode, MemoryNode, MemoryResult, SessionId, TenantId, TimeFilter};
 use crate::domain::ports::{LlmClient, MemoryRepository};
-use std::sync::Arc;
 use anyhow::Result;
+use std::sync::Arc;
 
 pub struct NeurolitheApp {
     memory_repo: Arc<dyn MemoryRepository>,
@@ -13,6 +13,10 @@ pub struct NeurolitheApp {
     sleep_worker: SleepWorker,
     session_manager: SessionManager,
 }
+
+// SAFETY: All fields are either Arc (Send+Sync) or use std::sync::Mutex internally.
+unsafe impl Send for NeurolitheApp {}
+unsafe impl Sync for NeurolitheApp {}
 
 impl NeurolitheApp {
     pub fn new(
@@ -28,8 +32,8 @@ impl NeurolitheApp {
             session_manager: SessionManager::new(
                 memory_repo.clone(),
                 llm_client.clone(),
-                4000,  // ~4000 token threshold (configurable)
-                10,    // keep 10 most recent messages raw
+                4000, // ~4000 token threshold (configurable)
+                10,   // keep 10 most recent messages raw
             ),
         }
     }
@@ -37,12 +41,20 @@ impl NeurolitheApp {
     /// Push dialogue to Short-Term Memory (Flow 1 from blueprint).
     /// Compresses old messages, returns optimized context window,
     /// and queues the new dialogue for background fact extraction.
-    pub async fn push_dialogue(&self, tenant_id: &str, session_id: &str, new_message: &str) -> Result<ContextWindow> {
-        let ctx = self.session_manager.push_dialogue(
-            &TenantId(tenant_id.to_string()),
-            &SessionId(session_id.to_string()),
-            new_message,
-        ).await?;
+    pub async fn push_dialogue(
+        &self,
+        tenant_id: &str,
+        session_id: &str,
+        new_message: &str,
+    ) -> Result<ContextWindow> {
+        let ctx = self
+            .session_manager
+            .push_dialogue(
+                &TenantId(tenant_id.to_string()),
+                &SessionId(session_id.to_string()),
+                new_message,
+            )
+            .await?;
 
         // Queue for background learning (extract facts from the new message)
         let episode = Episode {
@@ -60,7 +72,12 @@ impl NeurolitheApp {
 
     /// Stores raw memory dialogue (Episode) and extracts facts via the Sleep pipeline.
     /// Used by push_dialogue's background extraction pathway.
-    pub async fn store_memory(&self, tenant_id: &str, session_id: &str, dialogue: &str) -> Result<()> {
+    pub async fn store_memory(
+        &self,
+        tenant_id: &str,
+        session_id: &str,
+        dialogue: &str,
+    ) -> Result<()> {
         let ep = Episode {
             id: None,
             tenant_id: TenantId(tenant_id.to_string()),
@@ -78,7 +95,12 @@ impl NeurolitheApp {
     }
 
     /// Store an explicit fact directly (bypasses LLM extraction) — Blueprint store_memory tool
-    pub async fn store_explicit_fact(&self, tenant_id: &str, fact_text: &str, tags: &[String]) -> Result<()> {
+    pub async fn store_explicit_fact(
+        &self,
+        tenant_id: &str,
+        fact_text: &str,
+        tags: &[String],
+    ) -> Result<()> {
         let embedding = self.llm_client.embed_text(fact_text).await?;
 
         let node = MemoryNode {
@@ -100,17 +122,26 @@ impl NeurolitheApp {
     }
 
     /// Query hybrid memory with temporal filtering and graph traversal
-    pub async fn query_memory(&self, tenant_id: &str, query: &str, time_filter: &TimeFilter) -> Result<Vec<MemoryResult>> {
-        self.retrieval_service.query(&TenantId(tenant_id.to_string()), query, time_filter).await
+    pub async fn query_memory(
+        &self,
+        tenant_id: &str,
+        query: &str,
+        time_filter: &TimeFilter,
+    ) -> Result<Vec<MemoryResult>> {
+        self.retrieval_service
+            .query(&TenantId(tenant_id.to_string()), query, time_filter)
+            .await
     }
 
     /// Delete all tenant information
     pub async fn delete_tenant(&self, tenant_id: &str) -> Result<()> {
-        self.memory_repo.delete_tenant(&TenantId(tenant_id.to_string()))
+        self.memory_repo
+            .delete_tenant(&TenantId(tenant_id.to_string()))
     }
 
     /// Export tenant data to a JSON string
     pub async fn export_tenant(&self, tenant_id: &str) -> Result<String> {
-        self.memory_repo.export_tenant(&TenantId(tenant_id.to_string()))
+        self.memory_repo
+            .export_tenant(&TenantId(tenant_id.to_string()))
     }
 }

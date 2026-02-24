@@ -4,7 +4,7 @@ use anyhow::Result;
 pub trait MemoryRepository {
     /// Store raw episodic dialogue
     fn store_episode(&self, episode: &Episode) -> Result<i64>;
-    
+
     /// Store a structured fact (Node) along with its embedding
     fn store_node(&self, node: &MemoryNode, embedding: &[f32]) -> Result<i64>;
 
@@ -12,20 +12,43 @@ pub trait MemoryRepository {
     fn store_edge(&self, edge: &Edge) -> Result<()>;
 
     /// Search via hybrid (Vector + FTS) search
-    fn hybrid_search(&self, query_text: &str, query_embedding: &[f32], tenant_id: &TenantId, limit: usize) -> Result<Vec<MemoryNode>>;
-    
+    fn hybrid_search(
+        &self,
+        query_text: &str,
+        query_embedding: &[f32],
+        tenant_id: &TenantId,
+        limit: usize,
+    ) -> Result<Vec<MemoryNode>>;
+
     /// Full hybrid search with 1-hop graph traversal and temporal filtering (blueprint spec)
-    fn query_with_graph(&self, query_text: &str, query_embedding: &[f32], tenant_id: &TenantId, time_filter: &TimeFilter, limit: usize) -> Result<Vec<MemoryResult>>;
+    fn query_with_graph(
+        &self,
+        query_text: &str,
+        query_embedding: &[f32],
+        tenant_id: &TenantId,
+        time_filter: &TimeFilter,
+        limit: usize,
+    ) -> Result<Vec<MemoryResult>>;
 
     /// Boost relevance score back to 1.0 on read (blueprint: reading resets decay)
     fn boost_relevance(&self, node_ids: &[i64]) -> Result<()>;
 
     /// Find nodes semantically similar to the given embedding (for conflict resolution)
-    fn find_similar_nodes(&self, embedding: &[f32], tenant_id: &TenantId, threshold: f64, limit: usize) -> Result<Vec<MemoryNode>>;
+    fn find_similar_nodes(
+        &self,
+        embedding: &[f32],
+        tenant_id: &TenantId,
+        threshold: f64,
+        limit: usize,
+    ) -> Result<Vec<MemoryNode>>;
 
     /// Update existing node by incrementing support_count and resetting relevance (for assimilation)
-    fn update_node_support(&self, node_id: i64, new_payload: Option<&serde_json::Value>) -> Result<()>;
-    
+    fn update_node_support(
+        &self,
+        node_id: i64,
+        new_payload: Option<&serde_json::Value>,
+    ) -> Result<()>;
+
     /// Delete all data for a given tenant
     fn delete_tenant(&self, tenant_id: &TenantId) -> Result<()>;
 
@@ -60,8 +83,8 @@ pub struct ExtractedRelationship {
 pub trait LlmClient {
     /// Extract factual statements from given raw dialogue
     async fn extract_facts(&self, dialogue: &str) -> Result<Vec<ExtractedFact>>;
-    
-    /// Generate a 1536d float vector for text 
+
+    /// Generate a 1536d float vector for text
     async fn embed_text(&self, text: &str) -> Result<Vec<f32>>;
 
     /// Compress/summarize old dialogue messages into a dense summary

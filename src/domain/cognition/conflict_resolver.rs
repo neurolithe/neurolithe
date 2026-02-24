@@ -1,7 +1,7 @@
 use crate::domain::models::TenantId;
 use crate::domain::ports::MemoryRepository;
-use std::sync::Arc;
 use anyhow::Result;
+use std::sync::Arc;
 
 /// The three adaptation modes from cognitive psychology:
 /// - Assimilate: Fact already exists, boost its support
@@ -21,6 +21,12 @@ pub struct ConflictResolver {
     pub assimilation_threshold: f64,
     /// Cosine distance threshold: between assimilation and this = "similar, update"
     pub accommodation_threshold: f64,
+}
+
+impl Default for ConflictResolver {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ConflictResolver {
@@ -56,10 +62,17 @@ impl ConflictResolver {
         // Since find_similar_nodes already filters by accommodation_threshold,
         // the presence of results means they're <= accommodation_threshold.
         // We check if the fact text is highly similar by comparing payloads.
-        
+
         let closest_id = closest.id.unwrap_or(0);
-        let existing_fact = closest.payload.get("fact").and_then(|f| f.as_str()).unwrap_or("");
-        let new_fact = new_payload.get("fact").and_then(|f| f.as_str()).unwrap_or("");
+        let existing_fact = closest
+            .payload
+            .get("fact")
+            .and_then(|f| f.as_str())
+            .unwrap_or("");
+        let new_fact = new_payload
+            .get("fact")
+            .and_then(|f| f.as_str())
+            .unwrap_or("");
 
         // Simple heuristic: if the first result is very close and facts overlap significantly
         // Since sqlite-vec returns ordered by distance, if we have a match, the first is closest
@@ -72,18 +85,19 @@ impl ConflictResolver {
         // Similar but different → Accommodate-Modify (update payload, boost support)
         // Merge: keep the new fact text but preserve existing tags
         let mut merged_payload = new_payload.clone();
-        if let Some(existing_tags) = closest.payload.get("tags") {
-            if let Some(new_tags) = merged_payload.get("tags").cloned() {
-                let mut all_tags: Vec<serde_json::Value> = existing_tags.as_array().cloned().unwrap_or_default();
-                if let Some(nt) = new_tags.as_array() {
-                    for t in nt {
-                        if !all_tags.contains(t) {
-                            all_tags.push(t.clone());
-                        }
+        if let Some(existing_tags) = closest.payload.get("tags")
+            && let Some(new_tags) = merged_payload.get("tags").cloned()
+        {
+            let mut all_tags: Vec<serde_json::Value> =
+                existing_tags.as_array().cloned().unwrap_or_default();
+            if let Some(nt) = new_tags.as_array() {
+                for t in nt {
+                    if !all_tags.contains(t) {
+                        all_tags.push(t.clone());
                     }
                 }
-                merged_payload["tags"] = serde_json::Value::Array(all_tags);
             }
+            merged_payload["tags"] = serde_json::Value::Array(all_tags);
         }
 
         memory_repo.update_node_support(closest_id, Some(&merged_payload))?;

@@ -1,9 +1,9 @@
 use crate::domain::models::{Episode, MemoryResult, SessionId, TenantId, TimeFilter};
 use crate::domain::ports::{LlmClient, MemoryRepository};
+use anyhow::Result;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use anyhow::Result;
-use serde::{Serialize, Deserialize};
 
 /// The optimized context window returned by push_dialogue
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -95,7 +95,7 @@ impl SessionManager {
             let buffer = sessions
                 .entry(session_id.0.clone())
                 .or_insert_with(SessionBuffer::new);
-            
+
             buffer.messages.push(new_message.to_string());
             buffer.token_count += message_tokens;
 
@@ -120,13 +120,10 @@ impl SessionManager {
         // 5. Retrieve relevant graph facts for the latest message
         let time_filter = TimeFilter::default();
         let embedding = self.llm_client.embed_text(new_message).await?;
-        let relevant_facts = self.memory_repo.query_with_graph(
-            new_message,
-            &embedding,
-            tenant_id,
-            &time_filter,
-            5,
-        ).unwrap_or_default();
+        let relevant_facts = self
+            .memory_repo
+            .query_with_graph(new_message, &embedding, tenant_id, &time_filter, 5)
+            .unwrap_or_default();
 
         // 6. Queue for background fact extraction (asynchronous learning)
         // In a full implementation, this would spawn a background task.
@@ -144,7 +141,7 @@ impl SessionManager {
         let messages_to_compress = {
             let sessions = self.sessions.lock().unwrap();
             let buffer = sessions.get(&session_id.0).unwrap();
-            
+
             if buffer.messages.len() <= self.keep_recent {
                 return Ok(());
             }
@@ -164,7 +161,11 @@ impl SessionManager {
         };
 
         let text_to_compress = if let Some(ref existing) = existing_summary {
-            format!("Previous summary: {}\n\nNew messages:\n{}", existing, messages_to_compress.join("\n"))
+            format!(
+                "Previous summary: {}\n\nNew messages:\n{}",
+                existing,
+                messages_to_compress.join("\n")
+            )
         } else {
             messages_to_compress.join("\n")
         };
@@ -176,13 +177,17 @@ impl SessionManager {
         {
             let mut sessions = self.sessions.lock().unwrap();
             let buffer = sessions.get_mut(&session_id.0).unwrap();
-            
+
             let compress_count = buffer.messages.len().saturating_sub(self.keep_recent);
             buffer.messages.drain(0..compress_count);
             buffer.summary = Some(new_summary);
-            
+
             // Recalculate token count
-            buffer.token_count = buffer.messages.iter().map(|m| Self::estimate_tokens(m)).sum();
+            buffer.token_count = buffer
+                .messages
+                .iter()
+                .map(|m| Self::estimate_tokens(m))
+                .sum();
             if let Some(ref s) = buffer.summary {
                 buffer.token_count += Self::estimate_tokens(s);
             }

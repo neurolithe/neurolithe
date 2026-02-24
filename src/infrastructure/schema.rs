@@ -82,7 +82,7 @@ pub fn init_schema(conn: &Connection, vector_dimension: usize) -> rusqlite::Resu
             INSERT INTO fts_nodes(fts_nodes, rowid, payload) VALUES ('delete', old.id, old.payload);
             INSERT INTO fts_nodes(rowid, payload) VALUES (new.id, new.payload);
         END;
-        "
+        ",
     )?;
 
     Ok(())
@@ -102,7 +102,7 @@ mod tests {
         let mut stmt = conn
             .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
             .unwrap();
-        
+
         let table_names: Vec<String> = stmt
             .query_map([], |row| row.get(0))
             .unwrap()

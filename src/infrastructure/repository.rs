@@ -1,7 +1,7 @@
 use crate::domain::models::{Episode, MemoryNode, TenantId};
 use crate::domain::ports::MemoryRepository;
-use rusqlite::{params, Connection};
 use anyhow::Result;
+use rusqlite::{Connection, params};
 
 pub struct SqliteMemoryRepository {
     conn: Connection,
@@ -28,9 +28,9 @@ impl MemoryRepository for SqliteMemoryRepository {
 
     fn store_node(&self, node: &MemoryNode, embedding: &[f32]) -> Result<i64> {
         let payload_json = serde_json::to_string(&node.payload)?;
-        
+
         let tx = self.conn.unchecked_transaction()?;
-        
+
         tx.execute(
             "INSERT INTO nodes (tenant_id, source_episode_id, payload, status, is_explicit, support_count, relevance_score) 
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -49,7 +49,7 @@ impl MemoryRepository for SqliteMemoryRepository {
         let embedding_bytes: &[u8] = unsafe {
             std::slice::from_raw_parts(
                 embedding.as_ptr() as *const u8,
-                embedding.len() * std::mem::size_of::<f32>(),
+                std::mem::size_of_val(embedding),
             )
         };
 
@@ -77,11 +77,17 @@ impl MemoryRepository for SqliteMemoryRepository {
         Ok(())
     }
 
-    fn hybrid_search(&self, query_text: &str, query_embedding: &[f32], tenant_id: &TenantId, limit: usize) -> Result<Vec<MemoryNode>> {
+    fn hybrid_search(
+        &self,
+        query_text: &str,
+        query_embedding: &[f32],
+        tenant_id: &TenantId,
+        limit: usize,
+    ) -> Result<Vec<MemoryNode>> {
         let embedding_bytes: &[u8] = unsafe {
             std::slice::from_raw_parts(
                 query_embedding.as_ptr() as *const u8,
-                query_embedding.len() * std::mem::size_of::<f32>(),
+                std::mem::size_of_val(query_embedding),
             )
         };
 
@@ -105,14 +111,9 @@ impl MemoryRepository for SqliteMemoryRepository {
         ";
 
         let mut stmt = self.conn.prepare(query)?;
-        
+
         let node_iter = stmt.query_map(
-            params![
-                embedding_bytes,
-                query_text,
-                limit as i64,
-                tenant_id.0
-            ],
+            params![embedding_bytes, query_text, limit as i64, tenant_id.0],
             |row| {
                 let payload_str: String = row.get(3)?;
                 Ok(MemoryNode {
@@ -136,11 +137,18 @@ impl MemoryRepository for SqliteMemoryRepository {
         Ok(results)
     }
 
-    fn query_with_graph(&self, query_text: &str, query_embedding: &[f32], tenant_id: &crate::domain::models::TenantId, time_filter: &crate::domain::models::TimeFilter, limit: usize) -> Result<Vec<crate::domain::models::MemoryResult>> {
+    fn query_with_graph(
+        &self,
+        query_text: &str,
+        query_embedding: &[f32],
+        tenant_id: &crate::domain::models::TenantId,
+        time_filter: &crate::domain::models::TimeFilter,
+        limit: usize,
+    ) -> Result<Vec<crate::domain::models::MemoryResult>> {
         let embedding_bytes: &[u8] = unsafe {
             std::slice::from_raw_parts(
                 query_embedding.as_ptr() as *const u8,
-                query_embedding.len() * std::mem::size_of::<f32>(),
+                std::mem::size_of_val(query_embedding),
             )
         };
 
@@ -180,24 +188,26 @@ impl MemoryRepository for SqliteMemoryRepository {
 
         let mut stmt = self.conn.prepare(query)?;
 
-        let rows: Vec<(i64, String, f64, String)> = stmt.query_map(
-            params![
-                embedding_bytes,
-                query_text,
-                tenant_id.0,
-                limit as i64,
-                time_filter.after,
-                time_filter.before,
-            ],
-            |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, f64>(2)?,
-                    row.get::<_, String>(3)?,
-                ))
-            },
-        )?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let rows: Vec<(i64, String, f64, String)> = stmt
+            .query_map(
+                params![
+                    embedding_bytes,
+                    query_text,
+                    tenant_id.0,
+                    limit as i64,
+                    time_filter.after,
+                    time_filter.before,
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, f64>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
 
         // Collect node IDs for relevance boost
         let node_ids: Vec<i64> = rows.iter().map(|(id, _, _, _)| *id).collect();
@@ -208,8 +218,13 @@ impl MemoryRepository for SqliteMemoryRepository {
         // Build token-optimized output with 1-hop connections
         let mut results = Vec::new();
         for (node_id, payload_str, _, updated_at) in &rows {
-            let payload: serde_json::Value = serde_json::from_str(payload_str).unwrap_or(serde_json::Value::Null);
-            let fact = payload.get("fact").and_then(|f| f.as_str()).unwrap_or("").to_string();
+            let payload: serde_json::Value =
+                serde_json::from_str(payload_str).unwrap_or(serde_json::Value::Null);
+            let fact = payload
+                .get("fact")
+                .and_then(|f| f.as_str())
+                .unwrap_or("")
+                .to_string();
 
             // Get 1-hop connections for this node
             let mut edge_stmt = self.conn.prepare(
@@ -221,26 +236,30 @@ impl MemoryRepository for SqliteMemoryRepository {
                  SELECT e.relation, e.valid_from, e.valid_until, n2.payload
                  FROM edges e
                  JOIN nodes n2 ON n2.id = e.source_id
-                 WHERE e.target_id = ?1"
+                 WHERE e.target_id = ?1",
             )?;
 
-            let connections: Vec<crate::domain::models::MemoryConnection> = edge_stmt.query_map(
-                params![node_id],
-                |row| {
+            let connections: Vec<crate::domain::models::MemoryConnection> = edge_stmt
+                .query_map(params![node_id], |row| {
                     let rel: String = row.get(0)?;
                     let vf: Option<String> = row.get(1)?;
                     let vu: Option<String> = row.get(2)?;
                     let entity_payload: String = row.get(3)?;
-                    let ep: serde_json::Value = serde_json::from_str(&entity_payload).unwrap_or(serde_json::Value::Null);
-                    let entity = ep.get("fact").and_then(|f| f.as_str()).unwrap_or("").to_string();
+                    let ep: serde_json::Value =
+                        serde_json::from_str(&entity_payload).unwrap_or(serde_json::Value::Null);
+                    let entity = ep
+                        .get("fact")
+                        .and_then(|f| f.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     Ok(crate::domain::models::MemoryConnection {
                         relation: rel,
                         entity,
                         valid_from: vf,
                         valid_until: vu,
                     })
-                },
-            )?.collect::<rusqlite::Result<Vec<_>>>()?;
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
 
             results.push(crate::domain::models::MemoryResult {
                 fact,
@@ -253,22 +272,36 @@ impl MemoryRepository for SqliteMemoryRepository {
     }
 
     fn boost_relevance(&self, node_ids: &[i64]) -> Result<()> {
-        let placeholders: Vec<String> = node_ids.iter().enumerate().map(|(i, _)| format!("?{}", i + 1)).collect();
+        let placeholders: Vec<String> = node_ids
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("?{}", i + 1))
+            .collect();
         let query = format!(
             "UPDATE nodes SET relevance_score = 1.0, last_accessed_at = CURRENT_TIMESTAMP WHERE id IN ({})",
             placeholders.join(", ")
         );
-        let params: Vec<Box<dyn rusqlite::types::ToSql>> = node_ids.iter().map(|id| Box::new(*id) as Box<dyn rusqlite::types::ToSql>).collect();
-        let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        let params: Vec<Box<dyn rusqlite::types::ToSql>> = node_ids
+            .iter()
+            .map(|id| Box::new(*id) as Box<dyn rusqlite::types::ToSql>)
+            .collect();
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            params.iter().map(|p| p.as_ref()).collect();
         self.conn.execute(&query, param_refs.as_slice())?;
         Ok(())
     }
 
-    fn find_similar_nodes(&self, embedding: &[f32], tenant_id: &TenantId, threshold: f64, limit: usize) -> Result<Vec<MemoryNode>> {
+    fn find_similar_nodes(
+        &self,
+        embedding: &[f32],
+        tenant_id: &TenantId,
+        threshold: f64,
+        limit: usize,
+    ) -> Result<Vec<MemoryNode>> {
         let embedding_bytes: &[u8] = unsafe {
             std::slice::from_raw_parts(
                 embedding.as_ptr() as *const u8,
-                embedding.len() * std::mem::size_of::<f32>(),
+                std::mem::size_of_val(embedding),
             )
         };
 
@@ -285,12 +318,7 @@ impl MemoryRepository for SqliteMemoryRepository {
         let mut stmt = self.conn.prepare(query)?;
 
         let node_iter = stmt.query_map(
-            params![
-                embedding_bytes,
-                limit as i64,
-                tenant_id.0,
-                threshold
-            ],
+            params![embedding_bytes, limit as i64, tenant_id.0, threshold],
             |row| {
                 let payload_str: String = row.get(3)?;
                 Ok(MemoryNode {
@@ -314,7 +342,11 @@ impl MemoryRepository for SqliteMemoryRepository {
         Ok(results)
     }
 
-    fn update_node_support(&self, node_id: i64, new_payload: Option<&serde_json::Value>) -> Result<()> {
+    fn update_node_support(
+        &self,
+        node_id: i64,
+        new_payload: Option<&serde_json::Value>,
+    ) -> Result<()> {
         if let Some(payload) = new_payload {
             let payload_json = serde_json::to_string(payload)?;
             self.conn.execute(
@@ -332,21 +364,29 @@ impl MemoryRepository for SqliteMemoryRepository {
 
     fn delete_tenant(&self, tenant_id: &TenantId) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
-        
+
         tx.execute(
             "DELETE FROM vec_nodes WHERE node_id IN (SELECT id FROM nodes WHERE tenant_id = ?1)",
             params![tenant_id.0],
         )?;
 
-        tx.execute("DELETE FROM nodes WHERE tenant_id = ?1", params![tenant_id.0])?;
-        tx.execute("DELETE FROM episodes WHERE tenant_id = ?1", params![tenant_id.0])?;
-        
+        tx.execute(
+            "DELETE FROM nodes WHERE tenant_id = ?1",
+            params![tenant_id.0],
+        )?;
+        tx.execute(
+            "DELETE FROM episodes WHERE tenant_id = ?1",
+            params![tenant_id.0],
+        )?;
+
         tx.commit()?;
         Ok(())
     }
 
     fn export_tenant(&self, tenant_id: &TenantId) -> Result<String> {
-        let mut stmt = self.conn.prepare("SELECT payload FROM nodes WHERE tenant_id = ?1")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT payload FROM nodes WHERE tenant_id = ?1")?;
         let payload_iter = stmt.query_map(params![tenant_id.0], |row| {
             let p: String = row.get(0)?;
             Ok(p)
@@ -367,23 +407,32 @@ impl MemoryRepository for SqliteMemoryRepository {
     }
 
     fn sweep_decay(&self, engine: &crate::domain::decay::DecayEngine) -> Result<()> {
-        let mut stmt = self.conn.prepare("SELECT id, relevance_score, status FROM nodes WHERE status = 'active'")?;
-        
-        let nodes_to_update: Result<Vec<(i64, f64, String)>> = stmt.query_map([], |row| {
-            let id: i64 = row.get(0)?;
-            let current_score: f64 = row.get(1)?;
-            let status: String = row.get(2)?;
-            Ok((id, current_score, status))
-        })?.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into);
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, relevance_score, status FROM nodes WHERE status = 'active'")?;
+
+        let nodes_to_update: Result<Vec<(i64, f64, String)>> = stmt
+            .query_map([], |row| {
+                let id: i64 = row.get(0)?;
+                let current_score: f64 = row.get(1)?;
+                let status: String = row.get(2)?;
+                Ok((id, current_score, status))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into);
 
         let nodes = nodes_to_update?;
-        
-        let days_elapsed = 1.0; 
-        
+
+        let days_elapsed = 1.0;
+
         let tx = self.conn.unchecked_transaction()?;
         for (id, current_score, _) in nodes {
             let new_score = engine.calculate_decay(current_score, days_elapsed);
-            let new_status = if new_score < 0.1 { "archived" } else { "active" };
+            let new_status = if new_score < 0.1 {
+                "archived"
+            } else {
+                "active"
+            };
 
             tx.execute(
                 "UPDATE nodes SET relevance_score = ?1, status = ?2 WHERE id = ?3",
@@ -412,7 +461,7 @@ mod tests {
     #[test]
     fn test_store_episode_and_node() {
         let repo = setup_mem_repo();
-        
+
         let episode = Episode {
             id: None,
             tenant_id: TenantId("test-tenant".into()),
@@ -441,14 +490,14 @@ mod tests {
 
         // Since repo is now a Box<dyn MemoryRepository>, we cannot directly access repo.conn.
         // For testing the internal state (trigger effects), we need another connection or a specialized test method.
-        // For now, testing the repository's returned behavior is sufficient since FTS trigger setups are tested 
+        // For now, testing the repository's returned behavior is sufficient since FTS trigger setups are tested
         // separately in schema tests.
     }
 
     #[test]
     fn test_hybrid_search() {
         let repo = setup_mem_repo();
-        
+
         // Let's create an episode
         let episode = Episode {
             id: None,
@@ -461,32 +510,47 @@ mod tests {
 
         // Node 1: Contains the keyword "dog" explicitly
         let node1 = MemoryNode {
-            id: None, tenant_id: TenantId("tenant-X".into()), source_episode_id: Some(ep_id),
+            id: None,
+            tenant_id: TenantId("tenant-X".into()),
+            source_episode_id: Some(ep_id),
             payload: json!({"fact": "User owns a dog"}),
-            status: "active".into(), is_explicit: true, support_count: 1, relevance_score: 1.0,
+            status: "active".into(),
+            is_explicit: true,
+            support_count: 1,
+            relevance_score: 1.0,
         };
         // Node 2: Contains another keyword but vector might be close
         let node2 = MemoryNode {
-            id: None, tenant_id: TenantId("tenant-X".into()), source_episode_id: Some(ep_id),
+            id: None,
+            tenant_id: TenantId("tenant-X".into()),
+            source_episode_id: Some(ep_id),
             payload: json!({"fact": "User is a programmer"}),
-            status: "active".into(), is_explicit: true, support_count: 1, relevance_score: 0.8,
+            status: "active".into(),
+            is_explicit: true,
+            support_count: 1,
+            relevance_score: 0.8,
         };
 
         let emb1 = vec![0.9f32; 1536];
         let emb2 = vec![0.1f32; 1536]; // different embedding
-        
+
         repo.store_node(&node1, &emb1).unwrap();
         repo.store_node(&node2, &emb2).unwrap();
 
         // Query combining text and an embedding close to emb1
-        let query_emb = vec![0.85f32; 1536]; 
-        
-        let results = repo.hybrid_search("dog", &query_emb, &TenantId("tenant-X".into()), 5).unwrap();
+        let query_emb = vec![0.85f32; 1536];
+
+        let results = repo
+            .hybrid_search("dog", &query_emb, &TenantId("tenant-X".into()), 5)
+            .unwrap();
         assert!(!results.is_empty());
 
         // Should rank node1 highest because it matches FTS "dog" AND vector distance is closer
         let ranked_top = &results[0];
-        assert_eq!(ranked_top.payload.get("fact").unwrap().as_str().unwrap(), "User owns a dog");
+        assert_eq!(
+            ranked_top.payload.get("fact").unwrap().as_str().unwrap(),
+            "User owns a dog"
+        );
     }
 
     #[test]
@@ -497,28 +561,56 @@ mod tests {
         let t2 = TenantId("tenant-B".into());
 
         // Setup tenant A
-        let ep1 = repo.store_episode(&Episode {
-            id: None, tenant_id: t1.clone(), session_id: SessionId("s1".into()),
-            raw_dialogue: "secret A".into(), created_at: None,
-        }).unwrap();
-        
-        repo.store_node(&MemoryNode {
-            id: None, tenant_id: t1.clone(), source_episode_id: Some(ep1),
-            payload: json!({"fact": "A fact"}), status: "active".into(),
-            is_explicit: false, support_count: 1, relevance_score: 1.0,
-        }, &vec![0.1; 1536]).unwrap();
+        let ep1 = repo
+            .store_episode(&Episode {
+                id: None,
+                tenant_id: t1.clone(),
+                session_id: SessionId("s1".into()),
+                raw_dialogue: "secret A".into(),
+                created_at: None,
+            })
+            .unwrap();
+
+        repo.store_node(
+            &MemoryNode {
+                id: None,
+                tenant_id: t1.clone(),
+                source_episode_id: Some(ep1),
+                payload: json!({"fact": "A fact"}),
+                status: "active".into(),
+                is_explicit: false,
+                support_count: 1,
+                relevance_score: 1.0,
+            },
+            &vec![0.1; 1536],
+        )
+        .unwrap();
 
         // Setup tenant B
-        let ep2 = repo.store_episode(&Episode {
-            id: None, tenant_id: t2.clone(), session_id: SessionId("s2".into()),
-            raw_dialogue: "secret B".into(), created_at: None,
-        }).unwrap();
+        let ep2 = repo
+            .store_episode(&Episode {
+                id: None,
+                tenant_id: t2.clone(),
+                session_id: SessionId("s2".into()),
+                raw_dialogue: "secret B".into(),
+                created_at: None,
+            })
+            .unwrap();
 
-        repo.store_node(&MemoryNode {
-            id: None, tenant_id: t2.clone(), source_episode_id: Some(ep2),
-            payload: json!({"fact": "B fact"}), status: "active".into(),
-            is_explicit: false, support_count: 1, relevance_score: 1.0,
-        }, &vec![0.2; 1536]).unwrap();
+        repo.store_node(
+            &MemoryNode {
+                id: None,
+                tenant_id: t2.clone(),
+                source_episode_id: Some(ep2),
+                payload: json!({"fact": "B fact"}),
+                status: "active".into(),
+                is_explicit: false,
+                support_count: 1,
+                relevance_score: 1.0,
+            },
+            &vec![0.2; 1536],
+        )
+        .unwrap();
 
         // Test Export
         let export_a = repo.export_tenant(&t1).unwrap();
@@ -529,7 +621,7 @@ mod tests {
         repo.delete_tenant(&t1).unwrap();
 
         let after_delete_a = repo.export_tenant(&t1).unwrap();
-        assert!(!after_delete_a.contains("A fact")); 
+        assert!(!after_delete_a.contains("A fact"));
 
         let export_b = repo.export_tenant(&t2).unwrap();
         assert!(export_b.contains("B fact")); // B untouched

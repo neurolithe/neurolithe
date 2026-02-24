@@ -1,8 +1,8 @@
-use crate::domain::ports::{MemoryRepository, LlmClient};
+use crate::domain::cognition::conflict_resolver::{AdaptationResult, ConflictResolver};
 use crate::domain::decay::DecayEngine;
-use crate::domain::cognition::conflict_resolver::{ConflictResolver, AdaptationResult};
-use std::sync::Arc;
+use crate::domain::ports::{LlmClient, MemoryRepository};
 use anyhow::Result;
+use std::sync::Arc;
 
 pub struct SleepWorker {
     memory_repo: Arc<dyn MemoryRepository>,
@@ -12,7 +12,11 @@ pub struct SleepWorker {
 }
 
 impl SleepWorker {
-    pub fn new(memory_repo: Arc<dyn MemoryRepository>, llm_client: Arc<dyn LlmClient>, half_life_days: f64) -> Self {
+    pub fn new(
+        memory_repo: Arc<dyn MemoryRepository>,
+        llm_client: Arc<dyn LlmClient>,
+        half_life_days: f64,
+    ) -> Self {
         Self {
             memory_repo,
             llm_client,
@@ -87,7 +91,8 @@ impl SleepWorker {
                     &episode.tenant_id,
                     &target_payload,
                 )? {
-                    AdaptationResult::Assimilated(id) | AdaptationResult::AccommodatedModify(id) => id,
+                    AdaptationResult::Assimilated(id)
+                    | AdaptationResult::AccommodatedModify(id) => id,
                     AdaptationResult::AccommodateCreate => {
                         let target_node = crate::domain::models::MemoryNode {
                             id: None,
@@ -99,7 +104,8 @@ impl SleepWorker {
                             support_count: 1,
                             relevance_score: 1.0,
                         };
-                        self.memory_repo.store_node(&target_node, &target_embedding)?
+                        self.memory_repo
+                            .store_node(&target_node, &target_embedding)?
                     }
                 };
 

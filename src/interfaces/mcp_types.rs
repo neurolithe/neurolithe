@@ -87,7 +87,7 @@ impl McpToolResult {
             is_error: false,
         }
     }
-    
+
     pub fn err(text: impl Into<String>) -> Self {
         Self {
             content: vec![McpContent::Text { text: text.into() }],

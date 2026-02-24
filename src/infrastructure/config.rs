@@ -46,11 +46,12 @@ impl AppConfig {
         }
 
         // Environment variables override file config (e.g. NEUROLITHE__LLM__PROVIDER=gemini)
-        builder = builder.add_source(config::Environment::with_prefix("NEUROLITHE").separator("__"));
+        builder =
+            builder.add_source(config::Environment::with_prefix("NEUROLITHE").separator("__"));
 
         let config = builder.build()?;
         let app_config: AppConfig = config.try_deserialize()?;
-        
+
         Ok(app_config)
     }
 }

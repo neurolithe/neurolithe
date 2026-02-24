@@ -4,6 +4,7 @@ use std::path::Path;
 pub fn init_db(path: Option<&impl AsRef<Path>>) -> rusqlite::Result<Connection> {
     // Load sqlite-vec extension automatically for all connections
     unsafe {
+        #[allow(clippy::missing_transmute_annotations)]
         rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute(
             sqlite_vec::sqlite3_vec_init as *const (),
         )));

@@ -21,7 +21,7 @@ pub struct MemoryNode {
     pub tenant_id: TenantId,
     pub source_episode_id: Option<i64>,
     pub payload: serde_json::Value,
-    
+
     // Cognitive Attributes
     pub status: String,
     pub is_explicit: bool,
@@ -83,7 +83,7 @@ mod tests {
 
         let serialized = serde_json::to_string(&node).unwrap();
         assert!(serialized.contains("tenant-123"));
-        
+
         let deserialized: MemoryNode = serde_json::from_str(&serialized).unwrap();
         assert_eq!(node, deserialized);
     }
