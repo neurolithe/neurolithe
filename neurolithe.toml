@@ -1,0 +1,38 @@
+[llm]
+# Provider can be "openai", "gemini", "anthropic", or "custom"
+provider = "custom"
+# The main model used for pulling facts out of short-term memory dialogue
+model = "openai/gpt-4o-mini"
+# The model used for semantic search vector embeddings
+embedding_model = "openai/text-embedding-3-small"
+base_url = "https://openrouter.ai/api/v1"
+
+# Example for Google Gemini:
+# provider = "gemini"
+# model = "gemini-2.5-flash"
+# embedding_model = "text-embedding-004"
+
+# Example for Anthropic Claude (Note: custom embeddings still required):
+# provider = "anthropic"
+# model = "claude-3-5-haiku-20241022"
+# embedding_model = "text-embedding-3-small"
+
+# Example for Custom / Local OpenAI Compatible APIs (like Ollama, LM Studio, vLLM):
+# provider = "custom"
+# model = "meta-llama/Llama-3-8b-chat-hf"
+# embedding_model = "nomic-embed-text"
+# base_url = "http://localhost:11434/v1"
+
+# Example for OpenRouter (OpenAI Compatible API):
+# provider = "custom"
+# model = "openai/gpt-4o-mini" # or any other OpenRouter model string
+# embedding_model = "text-embedding-3-small" # Note: OpenRouter doesn't do embeddings natively well yet, you may need a separate provider for embeddings if not using OpenAI/Cohere through them.
+# base_url = "https://openrouter.ai/api/v1"
+
+[database]
+# The path where SQLite stores the database. Default is neurolithe.sqlite
+path = "neurolithe.sqlite"
+# The size of the expected vector embedding. Default is 1536 (OpenAI). 
+# If using `nomic-embed-text` setup 768. If `text-embedding-004` setup 768.
+# ** Important **: Changing this on an existing database will cause errors. You must delete the database to resize the vector dimension.
+vector_dimension = 1536

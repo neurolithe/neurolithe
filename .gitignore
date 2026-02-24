@@ -1,0 +1,11 @@
+/target
+/private
+docs/book
+
+# macOS
+.DS_Store
+
+# SQLite runtime database files
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal

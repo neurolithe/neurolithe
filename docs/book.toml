@@ -1,0 +1,15 @@
+[book]
+title = "NeuroLithe Documentation"
+authors = ["NeuroLithe Contributors"]
+description = "Official documentation for NeuroLithe — the embedded AI memory engine."
+language = "en"
+src = "src"
+
+[build]
+build-dir = "book"
+
+[output.html]
+default-theme = "navy"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/neurolithe/neurolithe"
+site-url = "/neurolithe/"
