@@ -2,6 +2,12 @@ use crate::domain::models::{Edge, Episode, MemoryNode, MemoryResult, TenantId, T
 use anyhow::Result;
 
 pub trait MemoryRepository {
+    /// Store a CCL definition in the registry
+    fn store_ccl_definition(&self, definition: &crate::domain::models::CclDefinition) -> Result<()>;
+
+    /// Retrieve all configured CCL definitions for a tenant
+    fn get_ccl_definitions(&self, tenant_id: &TenantId) -> Result<Vec<crate::domain::models::CclDefinition>>;
+
     /// Store raw episodic dialogue
     fn store_episode(&self, episode: &Episode) -> Result<i64>;
 
@@ -27,6 +33,7 @@ pub trait MemoryRepository {
         query_embedding: &[f32],
         tenant_id: &TenantId,
         time_filter: &TimeFilter,
+        ccl_filter: &[String],
         limit: usize,
     ) -> Result<Vec<MemoryResult>>;
 
@@ -61,9 +68,15 @@ pub trait MemoryRepository {
 
 use serde::{Deserialize, Serialize};
 
+pub fn default_ccl() -> String {
+    "reality".to_string()
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ExtractedFact {
     pub fact: String,
+    #[serde(default = "default_ccl")]
+    pub ccl: String,
     pub tags: Vec<String>,
     #[serde(default)]
     pub relationships: Vec<ExtractedRelationship>,
@@ -73,6 +86,8 @@ pub struct ExtractedFact {
 pub struct ExtractedRelationship {
     pub target_entity: String,
     pub relation: String,
+    #[serde(default = "default_ccl")]
+    pub ccl: String,
     #[serde(default)]
     pub valid_from: Option<String>,
     #[serde(default)]
@@ -82,7 +97,10 @@ pub struct ExtractedRelationship {
 #[async_trait::async_trait]
 pub trait LlmClient {
     /// Extract factual statements from given raw dialogue
-    async fn extract_facts(&self, dialogue: &str) -> Result<Vec<ExtractedFact>>;
+    async fn extract_facts(&self, dialogue: &str, valid_ccls: &[crate::domain::models::CclDefinition]) -> Result<Vec<ExtractedFact>>;
+
+    /// Generate a short description for a new cognitive context layer
+    async fn generate_ccl_description(&self, ccl_name: &str, context: &str) -> Result<String>;
 
     /// Generate a 1536d float vector for text
     async fn embed_text(&self, text: &str) -> Result<Vec<f32>>;

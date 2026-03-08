@@ -76,6 +76,7 @@ impl SessionManager {
         tenant_id: &TenantId,
         session_id: &SessionId,
         new_message: &str,
+        ccl: &str,
     ) -> Result<ContextWindow> {
         let message_tokens = Self::estimate_tokens(new_message);
 
@@ -85,6 +86,7 @@ impl SessionManager {
             tenant_id: tenant_id.clone(),
             session_id: session_id.clone(),
             raw_dialogue: new_message.to_string(),
+            ccl: ccl.to_string(),
             created_at: None,
         };
         let _ep_id = self.memory_repo.store_episode(&episode)?;
@@ -120,9 +122,10 @@ impl SessionManager {
         // 5. Retrieve relevant graph facts for the latest message
         let time_filter = TimeFilter::default();
         let embedding = self.llm_client.embed_text(new_message).await?;
+        let ccl_filter = vec![ccl.to_string()];
         let relevant_facts = self
             .memory_repo
-            .query_with_graph(new_message, &embedding, tenant_id, &time_filter, 5)
+            .query_with_graph(new_message, &embedding, tenant_id, &time_filter, &ccl_filter, 5)
             .unwrap_or_default();
 
         // 6. Queue for background fact extraction (asynchronous learning)

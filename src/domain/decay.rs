@@ -56,6 +56,7 @@ mod tests {
             source_episode_id: Some(1),
             payload: json!({}),
             status: "active".into(),
+            ccl: "reality".into(),
             is_explicit: false,
             support_count: 1,
             relevance_score: 0.15,

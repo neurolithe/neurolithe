@@ -8,6 +8,7 @@ Push the latest conversation turn to Short-Term Memory. The service automaticall
 {
   "session_id": "string (required)",
   "new_message": "string (required)",
+  "ccl": "string (optional, default: 'reality')",
   "tenant_id": "string (optional, default: 'default')"
 }
 ```
@@ -23,11 +24,13 @@ Returns a `ContextWindow` object:
   "relevant_facts": [
     {
       "fact": "User lives in Berlin",
+      "ccl": "reality",
       "last_updated": "2026-02-23T14:00:00",
       "connections": [
         {
           "relation": "LIVES_IN",
           "entity": "Berlin",
+          "ccl": "reality",
           "valid_from": "2026-01-15",
           "valid_until": null
         }
