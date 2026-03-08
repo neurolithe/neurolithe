@@ -3,6 +3,18 @@ use rusqlite::Connection;
 /// Initialize the database schema for NeuroLithe memory service.
 /// This creates the required `episodes`, `nodes`, and `edges` tables if they don't exist.
 pub fn init_schema(conn: &Connection, vector_dimension: usize) -> rusqlite::Result<()> {
+    // 0. The CCL Registry
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS ccl_registry (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tenant_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            description TEXT NOT NULL,
+            UNIQUE(tenant_id, name)
+        )",
+        [],
+    )?;
+
     // 1. The Ground-Truth Episodic Logs
     conn.execute(
         "CREATE TABLE IF NOT EXISTS episodes (
@@ -10,6 +22,7 @@ pub fn init_schema(conn: &Connection, vector_dimension: usize) -> rusqlite::Resu
             tenant_id TEXT NOT NULL,
             session_id TEXT NOT NULL,
             raw_dialogue TEXT NOT NULL,
+            ccl TEXT DEFAULT 'reality',
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )",
         [],
@@ -23,6 +36,7 @@ pub fn init_schema(conn: &Connection, vector_dimension: usize) -> rusqlite::Resu
             source_episode_id INTEGER,
             payload JSON NOT NULL,
             status TEXT DEFAULT 'active',
+            ccl TEXT DEFAULT 'reality',
             is_explicit BOOLEAN DEFAULT 0,
             support_count INTEGER DEFAULT 1,
             relevance_score REAL DEFAULT 1.0,
@@ -40,6 +54,7 @@ pub fn init_schema(conn: &Connection, vector_dimension: usize) -> rusqlite::Resu
             source_id INTEGER,
             target_id INTEGER,
             relation TEXT NOT NULL,
+            ccl TEXT DEFAULT 'reality',
             valid_from DATETIME,
             valid_until DATETIME,
             weight REAL DEFAULT 1.0,
@@ -112,6 +127,7 @@ mod tests {
         assert!(table_names.contains(&"episodes".to_string()));
         assert!(table_names.contains(&"nodes".to_string()));
         assert!(table_names.contains(&"edges".to_string()));
+        assert!(table_names.contains(&"ccl_registry".to_string()));
         assert!(table_names.contains(&"vec_nodes".to_string()));
         assert!(table_names.contains(&"fts_nodes".to_string()));
     }

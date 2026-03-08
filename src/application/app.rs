@@ -46,6 +46,7 @@ impl NeurolitheApp {
         tenant_id: &str,
         session_id: &str,
         new_message: &str,
+        ccl: &str,
     ) -> Result<ContextWindow> {
         let ctx = self
             .session_manager
@@ -53,6 +54,7 @@ impl NeurolitheApp {
                 &TenantId(tenant_id.to_string()),
                 &SessionId(session_id.to_string()),
                 new_message,
+                ccl,
             )
             .await?;
 
@@ -62,6 +64,7 @@ impl NeurolitheApp {
             tenant_id: TenantId(tenant_id.to_string()),
             session_id: SessionId(session_id.to_string()),
             raw_dialogue: new_message.to_string(),
+            ccl: ccl.to_string(),
             created_at: None,
         };
         // Fire-and-forget: in production this would be async/background
@@ -77,12 +80,14 @@ impl NeurolitheApp {
         tenant_id: &str,
         session_id: &str,
         dialogue: &str,
+        ccl: &str,
     ) -> Result<()> {
         let ep = Episode {
             id: None,
             tenant_id: TenantId(tenant_id.to_string()),
             session_id: SessionId(session_id.to_string()),
             raw_dialogue: dialogue.to_string(),
+            ccl: ccl.to_string(),
             created_at: None,
         };
 
@@ -100,6 +105,7 @@ impl NeurolitheApp {
         tenant_id: &str,
         fact_text: &str,
         tags: &[String],
+        ccl: &str,
     ) -> Result<()> {
         let embedding = self.llm_client.embed_text(fact_text).await?;
 
@@ -112,6 +118,7 @@ impl NeurolitheApp {
                 "tags": tags
             }),
             status: "active".into(),
+            ccl: ccl.to_string(),
             is_explicit: true,
             support_count: 1,
             relevance_score: 1.0,
@@ -127,10 +134,35 @@ impl NeurolitheApp {
         tenant_id: &str,
         query: &str,
         time_filter: &TimeFilter,
+        ccl_filter: &[String],
     ) -> Result<Vec<MemoryResult>> {
         self.retrieval_service
-            .query(&TenantId(tenant_id.to_string()), query, time_filter)
+            .query(
+                &TenantId(tenant_id.to_string()),
+                query,
+                time_filter,
+                ccl_filter,
+            )
             .await
+    }
+
+    pub async fn register_ccl(&self, tenant_id: &str, name: &str, description: &str) -> Result<()> {
+        let def = crate::domain::models::CclDefinition {
+            id: None,
+            tenant_id: TenantId(tenant_id.to_string()),
+            name: name.to_string(),
+            description: description.to_string(),
+        };
+        self.memory_repo.store_ccl_definition(&def)?;
+        Ok(())
+    }
+
+    pub async fn get_ccl_layers(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<crate::domain::models::CclDefinition>> {
+        self.memory_repo
+            .get_ccl_definitions(&TenantId(tenant_id.to_string()))
     }
 
     /// Delete all tenant information

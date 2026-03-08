@@ -52,16 +52,28 @@ impl OpenAiClient {
 
 #[async_trait::async_trait]
 impl LlmClient for OpenAiClient {
-    async fn extract_facts(&self, dialogue: &str) -> Result<Vec<ExtractedFact>> {
-        let system_prompt = "
+    async fn extract_facts(
+        &self,
+        dialogue: &str,
+        valid_ccls: &[crate::domain::models::CclDefinition],
+    ) -> Result<Vec<ExtractedFact>> {
+        let ccl_descriptions = valid_ccls
+            .iter()
+            .map(|c| format!("- '{}' ({})", c.name, c.description))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let system_prompt = format!("
             Extract independent factual statements from the user's dialogue.
             Only extract facts that represent long-term knowledge, preferences, or identifiers.
             For each fact, also extract any relationships to other entities with temporal bounds.
-            Return format: {\"facts\": [{\"fact\": \"...\", \"tags\": [...], \"relationships\": [{\"target_entity\": \"...\", \"relation\": \"WORKS_AT\", \"valid_from\": \"YYYY-MM-DD or null\", \"valid_until\": \"YYYY-MM-DD or null\"}]}]}
-            Example: {\"facts\": [{\"fact\": \"Alice works at Google since 2021\", \"tags\": [\"employment\"], \"relationships\": [{\"target_entity\": \"Google\", \"relation\": \"WORKS_AT\", \"valid_from\": \"2021-01-01\", \"valid_until\": null}]}]}
-            If no facts are present, return {\"facts\": []}.
+            The available Cognitive Context Layers (CCL) are:
+{}
+            You MUST assign a valid 'ccl' to each fact and relationship based on these definitions.
+            Return format: {{\"facts\": [{{\"fact\": \"...\", \"ccl\": \"reality\", \"tags\": [...], \"relationships\": [{{\"target_entity\": \"...\", \"relation\": \"WORKS_AT\", \"ccl\": \"reality\", \"valid_from\": \"YYYY-MM-DD or null\", \"valid_until\": \"YYYY-MM-DD or null\"}}]}}]}}
+            If no facts are present, return {{\"facts\": []}}.
             Output ONLY valid JSON.
-        ";
+        ", ccl_descriptions);
 
         let payload = json!({
             "model": self.model,
@@ -97,6 +109,46 @@ impl LlmClient for OpenAiClient {
         let facts = serde_json::from_value(parsed["facts"].clone())?;
 
         Ok(facts)
+    }
+
+    async fn generate_ccl_description(&self, ccl_name: &str, context: &str) -> Result<String> {
+        let system_prompt = "You are a helpful assistant. Generate a generic one-line description for the conceptual memory layer requested.";
+        let user_prompt = format!(
+            "Generate a generic one-line description for the conceptual memory layer '{}' based on the following context:\n{}",
+            ccl_name, context
+        );
+
+        let payload = json!({
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ]
+        });
+
+        let url = format!("{}/chat/completions", self.base_url);
+        let resp = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("HTTP-Referer", "https://neurolithe.com")
+            .header("X-Title", "NeuroLithe")
+            .json(&payload)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let error_text = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("OpenAI API error: {}", error_text));
+        }
+
+        let resp_json: serde_json::Value = resp.json().await?;
+        let description = resp_json["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        Ok(description)
     }
 
     async fn embed_text(&self, text: &str) -> Result<Vec<f32>> {
@@ -187,16 +239,28 @@ impl GeminiClient {
 
 #[async_trait::async_trait]
 impl LlmClient for GeminiClient {
-    async fn extract_facts(&self, dialogue: &str) -> Result<Vec<ExtractedFact>> {
-        let system_prompt = "
+    async fn extract_facts(
+        &self,
+        dialogue: &str,
+        valid_ccls: &[crate::domain::models::CclDefinition],
+    ) -> Result<Vec<ExtractedFact>> {
+        let ccl_descriptions = valid_ccls
+            .iter()
+            .map(|c| format!("- '{}' ({})", c.name, c.description))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let system_prompt = format!("
             Extract independent factual statements from the user's dialogue.
             Only extract facts that represent long-term knowledge, preferences, or identifiers.
             For each fact, also extract any relationships to other entities with temporal bounds.
-            Return format: {\"facts\": [{\"fact\": \"...\", \"tags\": [...], \"relationships\": [{\"target_entity\": \"...\", \"relation\": \"WORKS_AT\", \"valid_from\": \"YYYY-MM-DD or null\", \"valid_until\": \"YYYY-MM-DD or null\"}]}]}
-            Example: {\"facts\": [{\"fact\": \"Alice works at Google since 2021\", \"tags\": [\"employment\"], \"relationships\": [{\"target_entity\": \"Google\", \"relation\": \"WORKS_AT\", \"valid_from\": \"2021-01-01\", \"valid_until\": null}]}]}
-            If no facts are present, return {\"facts\": []}.
+            The available Cognitive Context Layers (CCL) are:
+{}
+            You MUST assign a valid 'ccl' to each fact and relationship based on these definitions.
+            Return format: {{\"facts\": [{{\"fact\": \"...\", \"ccl\": \"reality\", \"tags\": [...], \"relationships\": [{{\"target_entity\": \"...\", \"relation\": \"WORKS_AT\", \"ccl\": \"reality\", \"valid_from\": \"YYYY-MM-DD or null\", \"valid_until\": \"YYYY-MM-DD or null\"}}]}}]}}
+            If no facts are present, return {{\"facts\": []}}.
             Output ONLY valid JSON.
-        ";
+        ", ccl_descriptions);
 
         let payload = json!({
             "system_instruction": {
@@ -230,6 +294,42 @@ impl LlmClient for GeminiClient {
         let facts = serde_json::from_value(parsed["facts"].clone())?;
 
         Ok(facts)
+    }
+
+    async fn generate_ccl_description(&self, ccl_name: &str, context: &str) -> Result<String> {
+        let system_prompt = "You are a helpful assistant. Generate a generic one-line description for the conceptual memory layer requested.";
+        let user_prompt = format!(
+            "Generate a generic one-line description for the conceptual memory layer '{}' based on the following context:\n{}",
+            ccl_name, context
+        );
+
+        let payload = json!({
+            "system_instruction": {
+                "parts": [{"text": system_prompt}]
+            },
+            "contents": [{
+                "parts": [{"text": user_prompt}]
+            }]
+        });
+
+        let url = format!(
+            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
+            self.model, self.api_key
+        );
+        let resp = self.client.post(&url).json(&payload).send().await?;
+
+        if !resp.status().is_success() {
+            let error_text = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("Gemini API error: {}", error_text));
+        }
+
+        let resp_json: serde_json::Value = resp.json().await?;
+        let description = resp_json["candidates"][0]["content"]["parts"][0]["text"]
+            .as_str()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        Ok(description)
     }
 
     async fn embed_text(&self, text: &str) -> Result<Vec<f32>> {
@@ -310,16 +410,28 @@ impl AnthropicClient {
 
 #[async_trait::async_trait]
 impl LlmClient for AnthropicClient {
-    async fn extract_facts(&self, dialogue: &str) -> Result<Vec<ExtractedFact>> {
-        let system_prompt = "
+    async fn extract_facts(
+        &self,
+        dialogue: &str,
+        valid_ccls: &[crate::domain::models::CclDefinition],
+    ) -> Result<Vec<ExtractedFact>> {
+        let ccl_descriptions = valid_ccls
+            .iter()
+            .map(|c| format!("- '{}' ({})", c.name, c.description))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let system_prompt = format!("
             Extract independent factual statements from the user's dialogue.
             Only extract facts that represent long-term knowledge, preferences, or identifiers.
             For each fact, also extract any relationships to other entities with temporal bounds.
-            Return format: {\"facts\": [{\"fact\": \"...\", \"tags\": [...], \"relationships\": [{\"target_entity\": \"...\", \"relation\": \"WORKS_AT\", \"valid_from\": \"YYYY-MM-DD or null\", \"valid_until\": \"YYYY-MM-DD or null\"}]}]}
-            Example: {\"facts\": [{\"fact\": \"Alice works at Google since 2021\", \"tags\": [\"employment\"], \"relationships\": [{\"target_entity\": \"Google\", \"relation\": \"WORKS_AT\", \"valid_from\": \"2021-01-01\", \"valid_until\": null}]}]}
-            If no facts are present, return {\"facts\": []}.
+            The available Cognitive Context Layers (CCL) are:
+{}
+            You MUST assign a valid 'ccl' to each fact and relationship based on these definitions.
+            Return format: {{\"facts\": [{{\"fact\": \"...\", \"ccl\": \"reality\", \"tags\": [...], \"relationships\": [{{\"target_entity\": \"...\", \"relation\": \"WORKS_AT\", \"ccl\": \"reality\", \"valid_from\": \"YYYY-MM-DD or null\", \"valid_until\": \"YYYY-MM-DD or null\"}}]}}]}}
+            If no facts are present, return {{\"facts\": []}}.
             Output ONLY valid JSON.
-        ";
+        ", ccl_descriptions);
 
         // Anthropic structure
         let payload = json!({
@@ -366,6 +478,46 @@ impl LlmClient for AnthropicClient {
         Err(anyhow!(
             "Anthropic does not offer a native embedding API. Please use OpenAI/Gemini or an OpenAI-compatible custom endpoint for embeddings."
         ))
+    }
+
+    async fn generate_ccl_description(&self, ccl_name: &str, context: &str) -> Result<String> {
+        let system_prompt = "You are a helpful assistant. Generate a generic one-line description for the conceptual memory layer requested.";
+        let user_prompt = format!(
+            "Generate a generic one-line description for the conceptual memory layer '{}' based on the following context:\n{}",
+            ccl_name, context
+        );
+
+        let payload = json!({
+            "model": self.model,
+            "max_tokens": 1024,
+            "system": system_prompt,
+            "messages": [
+                {"role": "user", "content": user_prompt}
+            ]
+        });
+
+        let resp = self
+            .client
+            .post("https://api.anthropic.com/v1/messages")
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", "2023-06-01")
+            .header("content-type", "application/json")
+            .json(&payload)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let error_text = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("Anthropic API error: {}", error_text));
+        }
+
+        let resp_json: serde_json::Value = resp.json().await?;
+        let content = resp_json["content"][0]["text"]
+            .as_str()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        Ok(content)
     }
 
     async fn compress_context(&self, messages: &str) -> Result<String> {
