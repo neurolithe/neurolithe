@@ -83,6 +83,7 @@ Add NeuroLithe to your MCP client (*Claude Desktop, Cursor, etc.*). The install 
   - **Long-Term Memory (LTM):** As STM fills up, old interactions are *compressed* into long-term factual nodes using SQLite + semantic vector embeddings (`sqlite-vec`).
 - 🗄️ **Seamless Integration:** Runs locally as an embedded database, meaning zero external infrastructure to manage.
 - ⏱️ **Adaptive Forgetting Curve:** Simulates human memory dynamics. Unused or unimportant factual nodes gradually decay over time unless reinforced.
+- 🌌 **Cognitive Context Layers (CCL):** Segregate memories by conceptual layers (e.g., 'reality', 'dream', 'simulation') to prevent AI hallucination and enable advanced counterfactual reasoning during hybrid searches.
 
 ## 🛠️ Tech Stack
 

@@ -14,13 +14,51 @@ impl SqliteMemoryRepository {
 }
 
 impl MemoryRepository for SqliteMemoryRepository {
+    fn store_ccl_definition(
+        &self,
+        definition: &crate::domain::models::CclDefinition,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO ccl_registry (tenant_id, name, description) VALUES (?1, ?2, ?3)",
+            params![
+                definition.tenant_id.0,
+                definition.name,
+                definition.description
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn get_ccl_definitions(
+        &self,
+        tenant_id: &TenantId,
+    ) -> Result<Vec<crate::domain::models::CclDefinition>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, name, description FROM ccl_registry WHERE tenant_id = ?1")?;
+        let def_iter = stmt.query_map(params![tenant_id.0], |row| {
+            Ok(crate::domain::models::CclDefinition {
+                id: Some(row.get(0)?),
+                tenant_id: tenant_id.clone(),
+                name: row.get(1)?,
+                description: row.get(2)?,
+            })
+        })?;
+        let mut results = Vec::new();
+        for def in def_iter {
+            results.push(def?);
+        }
+        Ok(results)
+    }
+
     fn store_episode(&self, episode: &Episode) -> Result<i64> {
         self.conn.execute(
-            "INSERT INTO episodes (tenant_id, session_id, raw_dialogue) VALUES (?1, ?2, ?3)",
+            "INSERT INTO episodes (tenant_id, session_id, raw_dialogue, ccl) VALUES (?1, ?2, ?3, ?4)",
             params![
                 episode.tenant_id.0,
                 episode.session_id.0,
-                episode.raw_dialogue
+                episode.raw_dialogue,
+                episode.ccl
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -32,13 +70,14 @@ impl MemoryRepository for SqliteMemoryRepository {
         let tx = self.conn.unchecked_transaction()?;
 
         tx.execute(
-            "INSERT INTO nodes (tenant_id, source_episode_id, payload, status, is_explicit, support_count, relevance_score) 
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO nodes (tenant_id, source_episode_id, payload, status, ccl, is_explicit, support_count, relevance_score) 
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 node.tenant_id.0,
                 node.source_episode_id,
                 payload_json,
                 node.status,
+                node.ccl,
                 node.is_explicit,
                 node.support_count,
                 node.relevance_score
@@ -64,11 +103,12 @@ impl MemoryRepository for SqliteMemoryRepository {
 
     fn store_edge(&self, edge: &crate::domain::models::Edge) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO edges (source_id, target_id, relation, valid_from, valid_until, weight) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO edges (source_id, target_id, relation, ccl, valid_from, valid_until, weight) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 edge.source_id,
                 edge.target_id,
                 edge.relation,
+                edge.ccl,
                 edge.valid_from,
                 edge.valid_until,
                 edge.weight
@@ -103,7 +143,7 @@ impl MemoryRepository for SqliteMemoryRepository {
                 SELECT node_id, SUM(score) as combined_score FROM hybrid_matches GROUP BY node_id ORDER BY combined_score LIMIT ?3
             )
             SELECT 
-                n.id, n.tenant_id, n.source_episode_id, n.payload, n.status, n.is_explicit, n.support_count, n.relevance_score
+                n.id, n.tenant_id, n.source_episode_id, n.payload, n.status, n.ccl, n.is_explicit, n.support_count, n.relevance_score
             FROM nodes n
             JOIN ranked_matches rm ON n.id = rm.node_id
             WHERE n.tenant_id = ?4 AND n.status = 'active'
@@ -122,9 +162,10 @@ impl MemoryRepository for SqliteMemoryRepository {
                     source_episode_id: row.get::<_, Option<i64>>(2)?,
                     payload: serde_json::from_str(&payload_str).unwrap_or(serde_json::Value::Null),
                     status: row.get(4)?,
-                    is_explicit: row.get(5)?,
-                    support_count: row.get(6)?,
-                    relevance_score: row.get(7)?,
+                    ccl: row.get(5)?,
+                    is_explicit: row.get(6)?,
+                    support_count: row.get(7)?,
+                    relevance_score: row.get(8)?,
                 })
             },
         )?;
@@ -143,8 +184,11 @@ impl MemoryRepository for SqliteMemoryRepository {
         query_embedding: &[f32],
         tenant_id: &crate::domain::models::TenantId,
         time_filter: &crate::domain::models::TimeFilter,
+        ccl_filter: &[String],
         limit: usize,
     ) -> Result<Vec<crate::domain::models::MemoryResult>> {
+        let ccl_json = serde_json::to_string(ccl_filter)?;
+
         let embedding_bytes: &[u8] = unsafe {
             std::slice::from_raw_parts(
                 query_embedding.as_ptr() as *const u8,
@@ -169,26 +213,29 @@ impl MemoryRepository for SqliteMemoryRepository {
                 WHERE source_id IN (SELECT node_id FROM ranked_matches)
                   AND (valid_until IS NULL OR ?5 IS NULL OR valid_until >= ?5)
                   AND (valid_from IS NULL OR ?6 IS NULL OR valid_from <= ?6)
+                  AND ccl IN (SELECT value FROM json_each(?7))
                 UNION
                 SELECT source_id AS node_id FROM edges
                 WHERE target_id IN (SELECT node_id FROM ranked_matches)
                   AND (valid_until IS NULL OR ?5 IS NULL OR valid_until >= ?5)
                   AND (valid_from IS NULL OR ?6 IS NULL OR valid_from <= ?6)
+                  AND ccl IN (SELECT value FROM json_each(?7))
             )
             SELECT
-                n.id, n.payload, n.relevance_score, n.updated_at
+                n.id, n.payload, n.ccl, n.relevance_score, n.updated_at
             FROM nodes n
             JOIN graph_context gc ON n.id = gc.node_id
             WHERE n.tenant_id = ?3 AND n.status = 'active'
               AND (n.created_at >= ?5 OR ?5 IS NULL)
               AND (n.created_at <= ?6 OR ?6 IS NULL)
+              AND n.ccl IN (SELECT value FROM json_each(?7))
             ORDER BY n.relevance_score DESC
             LIMIT ?4;
         ";
 
         let mut stmt = self.conn.prepare(query)?;
 
-        let rows: Vec<(i64, String, f64, String)> = stmt
+        let rows: Vec<(i64, String, String, f64, String)> = stmt
             .query_map(
                 params![
                     embedding_bytes,
@@ -197,29 +244,31 @@ impl MemoryRepository for SqliteMemoryRepository {
                     limit as i64,
                     time_filter.after,
                     time_filter.before,
+                    &ccl_json,
                 ],
                 |row| {
                     Ok((
                         row.get::<_, i64>(0)?,
                         row.get::<_, String>(1)?,
-                        row.get::<_, f64>(2)?,
-                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, f64>(3)?,
+                        row.get::<_, String>(4)?,
                     ))
                 },
             )?
             .collect::<rusqlite::Result<Vec<_>>>()?;
 
         // Collect node IDs for relevance boost
-        let node_ids: Vec<i64> = rows.iter().map(|(id, _, _, _)| *id).collect();
+        let node_ids: Vec<i64> = rows.iter().map(|(id, _, _, _, _)| *id).collect();
         if !node_ids.is_empty() {
             self.boost_relevance(&node_ids)?;
         }
 
         // Build token-optimized output with 1-hop connections
         let mut results = Vec::new();
-        for (node_id, payload_str, _, updated_at) in &rows {
+        for (node_id, payload_str, ccl, _, updated_at) in rows {
             let payload: serde_json::Value =
-                serde_json::from_str(payload_str).unwrap_or(serde_json::Value::Null);
+                serde_json::from_str(&payload_str).unwrap_or(serde_json::Value::Null);
             let fact = payload
                 .get("fact")
                 .and_then(|f| f.as_str())
@@ -228,23 +277,26 @@ impl MemoryRepository for SqliteMemoryRepository {
 
             // Get 1-hop connections for this node
             let mut edge_stmt = self.conn.prepare(
-                "SELECT e.relation, e.valid_from, e.valid_until, n2.payload
+                "SELECT e.relation, e.ccl, e.valid_from, e.valid_until, n2.payload
                  FROM edges e
                  JOIN nodes n2 ON n2.id = e.target_id
                  WHERE e.source_id = ?1
+                   AND e.ccl IN (SELECT value FROM json_each(?2))
                  UNION ALL
-                 SELECT e.relation, e.valid_from, e.valid_until, n2.payload
+                 SELECT e.relation, e.ccl, e.valid_from, e.valid_until, n2.payload
                  FROM edges e
                  JOIN nodes n2 ON n2.id = e.source_id
-                 WHERE e.target_id = ?1",
+                 WHERE e.target_id = ?1
+                   AND e.ccl IN (SELECT value FROM json_each(?2))",
             )?;
 
             let connections: Vec<crate::domain::models::MemoryConnection> = edge_stmt
-                .query_map(params![node_id], |row| {
+                .query_map(params![node_id, &ccl_json], |row| {
                     let rel: String = row.get(0)?;
-                    let vf: Option<String> = row.get(1)?;
-                    let vu: Option<String> = row.get(2)?;
-                    let entity_payload: String = row.get(3)?;
+                    let edge_ccl: String = row.get(1)?;
+                    let vf: Option<String> = row.get(2)?;
+                    let vu: Option<String> = row.get(3)?;
+                    let entity_payload: String = row.get(4)?;
                     let ep: serde_json::Value =
                         serde_json::from_str(&entity_payload).unwrap_or(serde_json::Value::Null);
                     let entity = ep
@@ -255,6 +307,7 @@ impl MemoryRepository for SqliteMemoryRepository {
                     Ok(crate::domain::models::MemoryConnection {
                         relation: rel,
                         entity,
+                        ccl: edge_ccl,
                         valid_from: vf,
                         valid_until: vu,
                     })
@@ -263,7 +316,8 @@ impl MemoryRepository for SqliteMemoryRepository {
 
             results.push(crate::domain::models::MemoryResult {
                 fact,
-                last_updated: updated_at.clone(),
+                ccl,
+                last_updated: updated_at,
                 connections,
             });
         }
@@ -306,7 +360,7 @@ impl MemoryRepository for SqliteMemoryRepository {
         };
 
         let query = "
-            SELECT n.id, n.tenant_id, n.source_episode_id, n.payload, n.status, n.is_explicit, n.support_count, n.relevance_score, v.distance
+            SELECT n.id, n.tenant_id, n.source_episode_id, n.payload, n.status, n.ccl, n.is_explicit, n.support_count, n.relevance_score, v.distance
             FROM vec_nodes v
             JOIN nodes n ON n.id = v.node_id
             WHERE v.embedding MATCH ?1 AND k = ?2
@@ -327,9 +381,10 @@ impl MemoryRepository for SqliteMemoryRepository {
                     source_episode_id: row.get::<_, Option<i64>>(2)?,
                     payload: serde_json::from_str(&payload_str).unwrap_or(serde_json::Value::Null),
                     status: row.get(4)?,
-                    is_explicit: row.get(5)?,
-                    support_count: row.get(6)?,
-                    relevance_score: row.get(7)?,
+                    ccl: row.get(5)?,
+                    is_explicit: row.get(6)?,
+                    support_count: row.get(7)?,
+                    relevance_score: row.get(8)?,
                 })
             },
         )?;
@@ -467,6 +522,7 @@ mod tests {
             tenant_id: TenantId("test-tenant".into()),
             session_id: SessionId("session-1".into()),
             raw_dialogue: "I live in Berlin".into(),
+            ccl: "reality".into(),
             created_at: None,
         };
 
@@ -479,6 +535,7 @@ mod tests {
             source_episode_id: Some(episode_id),
             payload: json!({"fact": "User lives in Berlin"}),
             status: "active".into(),
+            ccl: "reality".into(),
             is_explicit: true,
             support_count: 1,
             relevance_score: 1.0,
@@ -504,6 +561,7 @@ mod tests {
             tenant_id: TenantId("tenant-X".into()),
             session_id: SessionId("session-1".into()),
             raw_dialogue: "I have a dog named Rust.".into(),
+            ccl: "reality".into(),
             created_at: None,
         };
         let ep_id = repo.store_episode(&episode).unwrap();
@@ -515,6 +573,7 @@ mod tests {
             source_episode_id: Some(ep_id),
             payload: json!({"fact": "User owns a dog"}),
             status: "active".into(),
+            ccl: "reality".into(),
             is_explicit: true,
             support_count: 1,
             relevance_score: 1.0,
@@ -526,6 +585,7 @@ mod tests {
             source_episode_id: Some(ep_id),
             payload: json!({"fact": "User is a programmer"}),
             status: "active".into(),
+            ccl: "reality".into(),
             is_explicit: true,
             support_count: 1,
             relevance_score: 0.8,
@@ -567,6 +627,7 @@ mod tests {
                 tenant_id: t1.clone(),
                 session_id: SessionId("s1".into()),
                 raw_dialogue: "secret A".into(),
+                ccl: "reality".into(),
                 created_at: None,
             })
             .unwrap();
@@ -578,6 +639,7 @@ mod tests {
                 source_episode_id: Some(ep1),
                 payload: json!({"fact": "A fact"}),
                 status: "active".into(),
+                ccl: "reality".into(),
                 is_explicit: false,
                 support_count: 1,
                 relevance_score: 1.0,
@@ -593,6 +655,7 @@ mod tests {
                 tenant_id: t2.clone(),
                 session_id: SessionId("s2".into()),
                 raw_dialogue: "secret B".into(),
+                ccl: "reality".into(),
                 created_at: None,
             })
             .unwrap();
@@ -604,6 +667,7 @@ mod tests {
                 source_episode_id: Some(ep2),
                 payload: json!({"fact": "B fact"}),
                 status: "active".into(),
+                ccl: "reality".into(),
                 is_explicit: false,
                 support_count: 1,
                 relevance_score: 1.0,

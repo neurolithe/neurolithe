@@ -7,11 +7,20 @@ pub struct TenantId(pub String);
 pub struct SessionId(pub String);
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CclDefinition {
+    pub id: Option<i64>,
+    pub tenant_id: TenantId,
+    pub name: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Episode {
     pub id: Option<i64>,
     pub tenant_id: TenantId,
     pub session_id: SessionId,
     pub raw_dialogue: String,
+    pub ccl: String,
     pub created_at: Option<String>,
 }
 
@@ -24,6 +33,7 @@ pub struct MemoryNode {
 
     // Cognitive Attributes
     pub status: String,
+    pub ccl: String,
     pub is_explicit: bool,
     pub support_count: i32,
     pub relevance_score: f64,
@@ -34,6 +44,7 @@ pub struct Edge {
     pub source_id: i64,
     pub target_id: i64,
     pub relation: String,
+    pub ccl: String,
     pub valid_from: Option<String>,
     pub valid_until: Option<String>,
     pub weight: f64,
@@ -50,6 +61,7 @@ pub struct TimeFilter {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryResult {
     pub fact: String,
+    pub ccl: String,
     pub last_updated: String,
     pub connections: Vec<MemoryConnection>,
 }
@@ -59,6 +71,7 @@ pub struct MemoryResult {
 pub struct MemoryConnection {
     pub relation: String,
     pub entity: String,
+    pub ccl: String,
     pub valid_from: Option<String>,
     pub valid_until: Option<String>,
 }
@@ -76,6 +89,7 @@ mod tests {
             source_episode_id: Some(42),
             payload: json!({"fact": "User is a programmer", "tags": ["profession"]}),
             status: "active".into(),
+            ccl: "reality".into(),
             is_explicit: true,
             support_count: 1,
             relevance_score: 1.0,

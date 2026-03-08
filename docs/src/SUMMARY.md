@@ -22,6 +22,8 @@
 - [Tool: push_dialogue](./mcp/push-dialogue.md)
 - [Tool: store_memory](./mcp/store-memory.md)
 - [Tool: query_memory](./mcp/query-memory.md)
+- [Tool: register_ccl](./mcp/register-ccl.md)
+- [Tool: get_ccl_layers](./mcp/get-ccl-layers.md)
 - [Tool: delete_tenant](./mcp/delete-tenant.md)
 - [Tool: export_tenant](./mcp/export-tenant.md)
 

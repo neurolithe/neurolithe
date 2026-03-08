@@ -11,6 +11,7 @@ Search the long-term knowledge graph for relevant historical context. Returns to
     "after": "YYYY-MM-DD (optional)",
     "before": "YYYY-MM-DD (optional)"
   },
+  "ccl_filter": ["string"] (optional, default: ['reality']),
   "tenant_id": "string (optional, default: 'default')"
 }
 ```
@@ -23,11 +24,13 @@ Returns an array of `MemoryResult` objects (token-optimized — no internal IDs 
 [
   {
     "fact": "Alice works at Google",
+    "ccl": "reality",
     "last_updated": "2026-02-20T10:30:00",
     "connections": [
       {
         "relation": "WORKS_AT",
         "entity": "Google",
+        "ccl": "reality",
         "valid_from": "2021-01-01",
         "valid_until": null
       }

@@ -8,6 +8,7 @@ Explicitly store a crucial fact immediately, bypassing the background extraction
 {
   "fact_text": "string (required)",
   "tags": ["string"] ,
+  "ccl": "string (optional, default: 'reality')",
   "tenant_id": "string (optional, default: 'default')"
 }
 ```

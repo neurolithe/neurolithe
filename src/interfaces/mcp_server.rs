@@ -80,10 +80,14 @@ impl McpServer {
                                 .collect()
                         })
                         .unwrap_or_default();
+                    let ccl = tool_args
+                        .get("ccl")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("reality");
 
                     match self
                         .app
-                        .store_explicit_fact(tenant_id, fact_text, &tags)
+                        .store_explicit_fact(tenant_id, fact_text, &tags, ccl)
                         .await
                     {
                         Ok(_) => McpToolResult::ok("Memory fact explicitly stored."),
@@ -104,10 +108,14 @@ impl McpServer {
                         .get("new_message")
                         .and_then(|v| v.as_str())
                         .unwrap_or("");
+                    let ccl = tool_args
+                        .get("ccl")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("reality");
 
                     match self
                         .app
-                        .push_dialogue(tenant_id, session_id, new_message)
+                        .push_dialogue(tenant_id, session_id, new_message, ccl)
                         .await
                     {
                         Ok(context_window) => {
@@ -133,8 +141,21 @@ impl McpServer {
                         .get("time_filter")
                         .and_then(|tf| serde_json::from_value::<TimeFilter>(tf.clone()).ok())
                         .unwrap_or_default();
+                    let ccl_filter: Vec<String> = tool_args
+                        .get("ccl_filter")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                .collect()
+                        })
+                        .unwrap_or_else(|| vec!["reality".to_string()]);
 
-                    match self.app.query_memory(tenant_id, query, &time_filter).await {
+                    match self
+                        .app
+                        .query_memory(tenant_id, query, &time_filter, &ccl_filter)
+                        .await
+                    {
                         Ok(results) => {
                             let json_results =
                                 serde_json::to_string(&results).unwrap_or("[]".into());
