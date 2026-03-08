@@ -151,7 +151,11 @@ impl McpServer {
                         })
                         .unwrap_or_else(|| vec!["reality".to_string()]);
 
-                    match self.app.query_memory(tenant_id, query, &time_filter, &ccl_filter).await {
+                    match self
+                        .app
+                        .query_memory(tenant_id, query, &time_filter, &ccl_filter)
+                        .await
+                    {
                         Ok(results) => {
                             let json_results =
                                 serde_json::to_string(&results).unwrap_or("[]".into());

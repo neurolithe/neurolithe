@@ -125,7 +125,14 @@ impl SessionManager {
         let ccl_filter = vec![ccl.to_string()];
         let relevant_facts = self
             .memory_repo
-            .query_with_graph(new_message, &embedding, tenant_id, &time_filter, &ccl_filter, 5)
+            .query_with_graph(
+                new_message,
+                &embedding,
+                tenant_id,
+                &time_filter,
+                &ccl_filter,
+                5,
+            )
             .unwrap_or_default();
 
         // 6. Queue for background fact extraction (asynchronous learning)

@@ -3,10 +3,14 @@ use anyhow::Result;
 
 pub trait MemoryRepository {
     /// Store a CCL definition in the registry
-    fn store_ccl_definition(&self, definition: &crate::domain::models::CclDefinition) -> Result<()>;
+    fn store_ccl_definition(&self, definition: &crate::domain::models::CclDefinition)
+    -> Result<()>;
 
     /// Retrieve all configured CCL definitions for a tenant
-    fn get_ccl_definitions(&self, tenant_id: &TenantId) -> Result<Vec<crate::domain::models::CclDefinition>>;
+    fn get_ccl_definitions(
+        &self,
+        tenant_id: &TenantId,
+    ) -> Result<Vec<crate::domain::models::CclDefinition>>;
 
     /// Store raw episodic dialogue
     fn store_episode(&self, episode: &Episode) -> Result<i64>;
@@ -97,7 +101,11 @@ pub struct ExtractedRelationship {
 #[async_trait::async_trait]
 pub trait LlmClient {
     /// Extract factual statements from given raw dialogue
-    async fn extract_facts(&self, dialogue: &str, valid_ccls: &[crate::domain::models::CclDefinition]) -> Result<Vec<ExtractedFact>>;
+    async fn extract_facts(
+        &self,
+        dialogue: &str,
+        valid_ccls: &[crate::domain::models::CclDefinition],
+    ) -> Result<Vec<ExtractedFact>>;
 
     /// Generate a short description for a new cognitive context layer
     async fn generate_ccl_description(&self, ccl_name: &str, context: &str) -> Result<String>;

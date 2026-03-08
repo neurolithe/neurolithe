@@ -137,16 +137,16 @@ impl NeurolitheApp {
         ccl_filter: &[String],
     ) -> Result<Vec<MemoryResult>> {
         self.retrieval_service
-            .query(&TenantId(tenant_id.to_string()), query, time_filter, ccl_filter)
+            .query(
+                &TenantId(tenant_id.to_string()),
+                query,
+                time_filter,
+                ccl_filter,
+            )
             .await
     }
 
-    pub async fn register_ccl(
-        &self,
-        tenant_id: &str,
-        name: &str,
-        description: &str,
-    ) -> Result<()> {
+    pub async fn register_ccl(&self, tenant_id: &str, name: &str, description: &str) -> Result<()> {
         let def = crate::domain::models::CclDefinition {
             id: None,
             tenant_id: TenantId(tenant_id.to_string()),
@@ -161,7 +161,8 @@ impl NeurolitheApp {
         &self,
         tenant_id: &str,
     ) -> Result<Vec<crate::domain::models::CclDefinition>> {
-        self.memory_repo.get_ccl_definitions(&TenantId(tenant_id.to_string()))
+        self.memory_repo
+            .get_ccl_definitions(&TenantId(tenant_id.to_string()))
     }
 
     /// Delete all tenant information

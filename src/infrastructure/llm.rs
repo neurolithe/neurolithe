@@ -52,7 +52,11 @@ impl OpenAiClient {
 
 #[async_trait::async_trait]
 impl LlmClient for OpenAiClient {
-    async fn extract_facts(&self, dialogue: &str, valid_ccls: &[crate::domain::models::CclDefinition]) -> Result<Vec<ExtractedFact>> {
+    async fn extract_facts(
+        &self,
+        dialogue: &str,
+        valid_ccls: &[crate::domain::models::CclDefinition],
+    ) -> Result<Vec<ExtractedFact>> {
         let ccl_descriptions = valid_ccls
             .iter()
             .map(|c| format!("- '{}' ({})", c.name, c.description))
@@ -109,7 +113,10 @@ impl LlmClient for OpenAiClient {
 
     async fn generate_ccl_description(&self, ccl_name: &str, context: &str) -> Result<String> {
         let system_prompt = "You are a helpful assistant. Generate a generic one-line description for the conceptual memory layer requested.";
-        let user_prompt = format!("Generate a generic one-line description for the conceptual memory layer '{}' based on the following context:\n{}", ccl_name, context);
+        let user_prompt = format!(
+            "Generate a generic one-line description for the conceptual memory layer '{}' based on the following context:\n{}",
+            ccl_name, context
+        );
 
         let payload = json!({
             "model": self.model,
@@ -232,7 +239,11 @@ impl GeminiClient {
 
 #[async_trait::async_trait]
 impl LlmClient for GeminiClient {
-    async fn extract_facts(&self, dialogue: &str, valid_ccls: &[crate::domain::models::CclDefinition]) -> Result<Vec<ExtractedFact>> {
+    async fn extract_facts(
+        &self,
+        dialogue: &str,
+        valid_ccls: &[crate::domain::models::CclDefinition],
+    ) -> Result<Vec<ExtractedFact>> {
         let ccl_descriptions = valid_ccls
             .iter()
             .map(|c| format!("- '{}' ({})", c.name, c.description))
@@ -287,7 +298,10 @@ impl LlmClient for GeminiClient {
 
     async fn generate_ccl_description(&self, ccl_name: &str, context: &str) -> Result<String> {
         let system_prompt = "You are a helpful assistant. Generate a generic one-line description for the conceptual memory layer requested.";
-        let user_prompt = format!("Generate a generic one-line description for the conceptual memory layer '{}' based on the following context:\n{}", ccl_name, context);
+        let user_prompt = format!(
+            "Generate a generic one-line description for the conceptual memory layer '{}' based on the following context:\n{}",
+            ccl_name, context
+        );
 
         let payload = json!({
             "system_instruction": {
@@ -396,7 +410,11 @@ impl AnthropicClient {
 
 #[async_trait::async_trait]
 impl LlmClient for AnthropicClient {
-    async fn extract_facts(&self, dialogue: &str, valid_ccls: &[crate::domain::models::CclDefinition]) -> Result<Vec<ExtractedFact>> {
+    async fn extract_facts(
+        &self,
+        dialogue: &str,
+        valid_ccls: &[crate::domain::models::CclDefinition],
+    ) -> Result<Vec<ExtractedFact>> {
         let ccl_descriptions = valid_ccls
             .iter()
             .map(|c| format!("- '{}' ({})", c.name, c.description))
@@ -464,7 +482,10 @@ impl LlmClient for AnthropicClient {
 
     async fn generate_ccl_description(&self, ccl_name: &str, context: &str) -> Result<String> {
         let system_prompt = "You are a helpful assistant. Generate a generic one-line description for the conceptual memory layer requested.";
-        let user_prompt = format!("Generate a generic one-line description for the conceptual memory layer '{}' based on the following context:\n{}", ccl_name, context);
+        let user_prompt = format!(
+            "Generate a generic one-line description for the conceptual memory layer '{}' based on the following context:\n{}",
+            ccl_name, context
+        );
 
         let payload = json!({
             "model": self.model,

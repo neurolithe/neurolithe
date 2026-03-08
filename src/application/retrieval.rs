@@ -29,9 +29,14 @@ impl RetrievalService {
         let embedding = self.llm_client.embed_text(raw_query).await?;
 
         // 2. Perform hybrid search with graph traversal + temporal filtering
-        let results =
-            self.memory_repo
-                .query_with_graph(raw_query, &embedding, tenant_id, time_filter, ccl_filter, 10)?;
+        let results = self.memory_repo.query_with_graph(
+            raw_query,
+            &embedding,
+            tenant_id,
+            time_filter,
+            ccl_filter,
+            10,
+        )?;
 
         Ok(results)
     }

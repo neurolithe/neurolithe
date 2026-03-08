@@ -37,14 +37,22 @@ impl SleepWorker {
     /// 3. Create edges for any extracted relationships
     pub async fn process_episode(&self, episode: &crate::domain::models::Episode) -> Result<()> {
         let valid_ccls = self.memory_repo.get_ccl_definitions(&episode.tenant_id)?;
-        let extracted_facts = self.llm_client.extract_facts(&episode.raw_dialogue, &valid_ccls).await?;
+        let extracted_facts = self
+            .llm_client
+            .extract_facts(&episode.raw_dialogue, &valid_ccls)
+            .await?;
 
-        let mut known_ccl_names: std::collections::HashSet<String> = valid_ccls.into_iter().map(|c| c.name).collect();
+        let mut known_ccl_names: std::collections::HashSet<String> =
+            valid_ccls.into_iter().map(|c| c.name).collect();
 
         for fact in extracted_facts {
             if !known_ccl_names.contains(&fact.ccl) {
                 let context = format!("Fact: {}", fact.fact);
-                let desc = self.llm_client.generate_ccl_description(&fact.ccl, &context).await.unwrap_or_else(|_| "Auto-generated cognitive layer".to_string());
+                let desc = self
+                    .llm_client
+                    .generate_ccl_description(&fact.ccl, &context)
+                    .await
+                    .unwrap_or_else(|_| "Auto-generated cognitive layer".to_string());
                 let new_def = crate::domain::models::CclDefinition {
                     id: None,
                     tenant_id: episode.tenant_id.clone(),

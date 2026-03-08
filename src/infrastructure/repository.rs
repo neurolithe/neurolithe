@@ -14,7 +14,10 @@ impl SqliteMemoryRepository {
 }
 
 impl MemoryRepository for SqliteMemoryRepository {
-    fn store_ccl_definition(&self, definition: &crate::domain::models::CclDefinition) -> Result<()> {
+    fn store_ccl_definition(
+        &self,
+        definition: &crate::domain::models::CclDefinition,
+    ) -> Result<()> {
         self.conn.execute(
             "INSERT OR REPLACE INTO ccl_registry (tenant_id, name, description) VALUES (?1, ?2, ?3)",
             params![
@@ -26,8 +29,13 @@ impl MemoryRepository for SqliteMemoryRepository {
         Ok(())
     }
 
-    fn get_ccl_definitions(&self, tenant_id: &TenantId) -> Result<Vec<crate::domain::models::CclDefinition>> {
-        let mut stmt = self.conn.prepare("SELECT id, name, description FROM ccl_registry WHERE tenant_id = ?1")?;
+    fn get_ccl_definitions(
+        &self,
+        tenant_id: &TenantId,
+    ) -> Result<Vec<crate::domain::models::CclDefinition>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, name, description FROM ccl_registry WHERE tenant_id = ?1")?;
         let def_iter = stmt.query_map(params![tenant_id.0], |row| {
             Ok(crate::domain::models::CclDefinition {
                 id: Some(row.get(0)?),
@@ -180,7 +188,7 @@ impl MemoryRepository for SqliteMemoryRepository {
         limit: usize,
     ) -> Result<Vec<crate::domain::models::MemoryResult>> {
         let ccl_json = serde_json::to_string(ccl_filter)?;
-        
+
         let embedding_bytes: &[u8] = unsafe {
             std::slice::from_raw_parts(
                 query_embedding.as_ptr() as *const u8,
