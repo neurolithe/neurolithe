@@ -156,4 +156,11 @@ pub trait LtmRepository {
     /// Delete a node and everything attached to it: its edges (either
     /// direction), its vector, and its leaf rows. Used by tombstone/forget.
     fn delete_node(&self, node_id: i64) -> Result<()>;
+
+    /// Top-level nodes — those with no parent edge. The map starts here.
+    fn get_roots(&self) -> Result<Vec<TreeNode>>;
+
+    /// The document leaves attached directly under a node (its leaf children),
+    /// each with `data_id` + provenance. Used by drill/recall.
+    fn get_child_leaves(&self, parent_id: i64) -> Result<Vec<Leaf>>;
 }

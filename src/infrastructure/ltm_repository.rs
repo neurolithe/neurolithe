@@ -4,7 +4,7 @@
 //! LTM database) and serializes access. Concept-node embeddings go into the
 //! `vec_ltm` sqlite-vec index; summaries are kept in `fts_ltm` via triggers.
 
-use crate::domain::ltm::{Leaf, LtmRepository, TreeEdge, TreeNode, TreeNodeKind};
+use crate::domain::ltm::{Leaf, LtmRepository, Provenance, TreeEdge, TreeNode, TreeNodeKind};
 use anyhow::Result;
 use rusqlite::{Connection, params};
 
@@ -271,6 +271,45 @@ impl LtmRepository for SqliteLtmRepository {
         tx.execute("DELETE FROM tree_nodes WHERE id = ?1", params![node_id])?;
         tx.commit()?;
         Ok(())
+    }
+
+    fn get_roots(&self) -> Result<Vec<TreeNode>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, summary, kind, permanent, created_at, updated_at
+             FROM tree_nodes n
+             WHERE NOT EXISTS (SELECT 1 FROM tree_edges e WHERE e.child_id = n.id)
+             ORDER BY n.id",
+        )?;
+        let rows = stmt.query_map([], Self::row_to_node)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    fn get_child_leaves(&self, parent_id: i64) -> Result<Vec<Leaf>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT l.tree_node_id, l.data_id, l.provenance
+             FROM leaves l
+             JOIN tree_edges e ON l.tree_node_id = e.child_id
+             WHERE e.parent_id = ?1
+             ORDER BY l.tree_node_id",
+        )?;
+        let rows = stmt.query_map(params![parent_id], |row| {
+            let tree_node_id: i64 = row.get(0)?;
+            let data_id: String = row.get(1)?;
+            let provenance_json: String = row.get(2)?;
+            Ok((tree_node_id, data_id, provenance_json))
+        })?;
+
+        let mut leaves = Vec::new();
+        for row in rows {
+            let (tree_node_id, data_id, provenance_json) = row?;
+            let provenance: Provenance = serde_json::from_str(&provenance_json)?;
+            leaves.push(Leaf {
+                tree_node_id,
+                data_id,
+                provenance,
+            });
+        }
+        Ok(leaves)
     }
 }
 
