@@ -19,6 +19,10 @@ pub fn init_db(path: Option<&impl AsRef<Path>>) -> rusqlite::Result<Connection> 
 
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
+    // Wait up to 5s on a locked DB instead of erroring — lets a transient MCP
+    // process (read/recall) share the stores with the running daemon (WAL =
+    // concurrent readers + one writer across processes).
+    conn.pragma_update(None, "busy_timeout", 5000)?;
 
     Ok(conn)
 }

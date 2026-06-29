@@ -193,6 +193,26 @@ pub async fn run(config: AppConfig) -> Result<()> {
     Ok(())
 }
 
+/// Run ONLY the MCP server over stdio — no feeder, consumers, or schedulers.
+///
+/// For a transient client session (e.g. Claude via `docker exec -i`) that shares
+/// the live stores with the running daemon: reads (recall + CT-scan) run
+/// concurrently under WAL; the occasional write waits on `busy_timeout`. Serves
+/// until stdin closes.
+pub async fn run_mcp(config: AppConfig) -> Result<()> {
+    let MemoryStores { stm, ltm } = init_stores(&config)?;
+    let stm_repo: Arc<dyn MemoryRepository> = Arc::new(SqliteMemoryRepository::new(stm));
+    let ltm_repo: Arc<dyn LtmRepository> = Arc::new(SqliteLtmRepository::new(ltm));
+    ltm_repo.seed_spine()?;
+
+    let llm: Arc<dyn LlmClient> =
+        create_llm_client(&config.llm, resolve_api_key(&config.llm.provider));
+    let app = Arc::new(NeurolitheApp::new(stm_repo.clone(), llm, 7.0));
+    let introspection = Arc::new(IntrospectionService::new(stm_repo, ltm_repo));
+
+    McpServer::new(app, introspection).run_stdio().await
+}
+
 /// Resolve on Ctrl-C (SIGINT) or, on Unix, SIGTERM — so `docker stop` shuts the
 /// daemon down gracefully instead of waiting for SIGKILL.
 async fn shutdown_signal() {
