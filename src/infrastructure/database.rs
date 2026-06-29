@@ -1,5 +1,5 @@
 use crate::infrastructure::config::AppConfig;
-use crate::infrastructure::schema::init_schema;
+use crate::infrastructure::schema::{init_ltm_schema, init_schema};
 use rusqlite::Connection;
 use std::path::Path;
 
@@ -35,17 +35,16 @@ pub struct MemoryStores {
     pub ltm: Connection,
 }
 
-/// Open both memory stores from config and apply each store's schema.
-///
-/// STM gets its full schema at its own vector dimension. The LTM connection is
-/// opened (creating its file) but its schema is deferred to slice 3 — the
-/// stores' dimensions are independent, so building one never affects the other.
+/// Open both memory stores from config and apply each store's schema at its own
+/// vector dimension. The stores' dimensions are independent, so building one
+/// never affects the other. Spine seeding is the LTM repository's job (called
+/// by the daemon, slice 11), not the schema's.
 pub fn init_stores(config: &AppConfig) -> rusqlite::Result<MemoryStores> {
     let stm = init_db(config.stm.path.as_ref())?;
     init_schema(&stm, config.stm.vector_dimension)?;
 
-    // LTM schema (tree_nodes/edges/leaves/vec_ltm/fts_ltm) arrives in slice 3.
     let ltm = init_db(config.ltm.path.as_ref())?;
+    init_ltm_schema(&ltm, config.ltm.vector_dimension)?;
 
     Ok(MemoryStores { stm, ltm })
 }

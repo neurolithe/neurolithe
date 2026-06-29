@@ -1,0 +1,138 @@
+//! Long-Term Memory (LTM) domain — the permanent knowledge tree.
+//!
+//! LTM is a poly-hierarchy (DAG) of concept nodes with documents attached as
+//! leaves by `dataId` reference. It never decays. The actual content stays in
+//! Ledger/Pithos; LTM holds *meaning* (rolling summaries + embeddings) and the
+//! `dataId` pointer only. See `V2-DESIGN.md` §3 and `JARVIS-MEMORY-TREE.md`.
+
+use anyhow::Result;
+use serde::{Deserialize, Serialize};
+
+/// What a tree node represents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TreeNodeKind {
+    /// Curated backbone — Reza's main branches, seeded once.
+    Spine,
+    /// AI-created concept node grown under the spine.
+    Grown,
+    /// Holding area for documents that found no good concept match.
+    Inbox,
+    /// A document, attached by `dataId` (see [`Leaf`]).
+    Leaf,
+}
+
+impl TreeNodeKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TreeNodeKind::Spine => "spine",
+            TreeNodeKind::Grown => "grown",
+            TreeNodeKind::Inbox => "inbox",
+            TreeNodeKind::Leaf => "leaf",
+        }
+    }
+
+    pub fn from_db_str(s: &str) -> Result<Self> {
+        Ok(match s {
+            "spine" => TreeNodeKind::Spine,
+            "grown" => TreeNodeKind::Grown,
+            "inbox" => TreeNodeKind::Inbox,
+            "leaf" => TreeNodeKind::Leaf,
+            other => anyhow::bail!("unknown tree_node kind: {other}"),
+        })
+    }
+}
+
+/// A concept (or leaf) node in the knowledge tree.
+///
+/// Concept nodes carry a rolling `summary` (indexed in `fts_ltm`) and an
+/// embedding of that summary (in `vec_ltm`). `permanent` is always true — the
+/// decay path must never touch LTM.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TreeNode {
+    pub id: Option<i64>,
+    pub name: String,
+    pub summary: String,
+    pub kind: TreeNodeKind,
+    pub permanent: bool,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+}
+
+impl TreeNode {
+    /// A new permanent node with no DB-assigned id/timestamps yet.
+    pub fn new(name: impl Into<String>, summary: impl Into<String>, kind: TreeNodeKind) -> Self {
+        Self {
+            id: None,
+            name: name.into(),
+            summary: summary.into(),
+            kind,
+            permanent: true,
+            created_at: None,
+            updated_at: None,
+        }
+    }
+}
+
+/// A directed parent → child edge. A child may have several parents (DAG), so
+/// `(parent_id, child_id)` together identify the edge.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TreeEdge {
+    pub parent_id: i64,
+    pub child_id: i64,
+    pub weight: f64,
+}
+
+impl TreeEdge {
+    pub fn new(parent_id: i64, child_id: i64) -> Self {
+        Self {
+            parent_id,
+            child_id,
+            weight: 1.0,
+        }
+    }
+}
+
+/// Where a leaf came from: source, ingest time, and the placement confidence.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Provenance {
+    pub source: String,
+    pub ingested_at: Option<String>,
+    pub confidence: f64,
+}
+
+/// A document attached to a leaf tree node by `dataId` reference. The bytes
+/// live in Ledger/Pithos; LTM stores only the pointer + provenance.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Leaf {
+    pub tree_node_id: i64,
+    pub data_id: String,
+    pub provenance: Provenance,
+}
+
+/// Persistence port for the LTM knowledge tree. Synchronous, like
+/// [`crate::domain::ports::MemoryRepository`]; the SQLite impl serializes
+/// access internally.
+pub trait LtmRepository {
+    /// Insert a tree node; if `embedding` is given it is stored in `vec_ltm`
+    /// (must match the LTM vector dimension). Returns the new node id.
+    fn create_node(&self, node: &TreeNode, embedding: Option<&[f32]>) -> Result<i64>;
+
+    /// Add a parent → child edge (idempotent on the pair).
+    fn add_edge(&self, edge: &TreeEdge) -> Result<()>;
+
+    /// Attach a document leaf (`tree_node_id` → `data_id` + provenance).
+    fn create_leaf(&self, leaf: &Leaf) -> Result<()>;
+
+    /// Fetch a node by id.
+    fn get_node(&self, id: i64) -> Result<Option<TreeNode>>;
+
+    /// Direct children of a node.
+    fn get_children(&self, parent_id: i64) -> Result<Vec<TreeNode>>;
+
+    /// Direct parents of a node (may be several — DAG).
+    fn get_parents(&self, child_id: i64) -> Result<Vec<TreeNode>>;
+
+    /// The leaf node carrying a given `data_id`, if any.
+    fn get_node_by_data_id(&self, data_id: &str) -> Result<Option<TreeNode>>;
+}
