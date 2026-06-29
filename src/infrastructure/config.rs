@@ -58,11 +58,14 @@ pub struct KafkaConfig {
     pub group_id: String,
 }
 
-/// Pithos archive-service base URL — the feeder fetches `pt://` document text
-/// over HTTP to distill meaning before writing to the stores.
+/// Pithos archive-service connection — the feeder fetches `pt://` document text
+/// over HTTP to distill meaning before writing to the stores. `token` is the
+/// Pithos bearer token (read access); empty means unauthenticated (tests/local).
 #[derive(Debug, Deserialize, Clone)]
 pub struct PithosConfig {
     pub base_url: String,
+    #[serde(default)]
+    pub token: String,
 }
 
 /// How often the background STM decay sweep runs (`run_decay_sweep`, wired in
@@ -114,6 +117,7 @@ impl AppConfig {
             .set_default("kafka.brokers", "localhost:9092")?
             .set_default("kafka.group_id", "neurolithe")?
             .set_default("pithos.base_url", "http://192.168.4.48:8080")?
+            .set_default("pithos.token", "")?
             // Daily decay sweep (sweep applies one half-life day per pass).
             .set_default("sweep.interval_secs", 86_400_i64)?
             .set_default("metrics.interval_secs", 60_i64)?

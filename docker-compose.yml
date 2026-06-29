@@ -1,0 +1,73 @@
+# NeuroLithe memory service — the JARVIS "brain", a long-running daemon on the
+# always-on Mac mini. Consumes `document.completed`, distills each document, and
+# dual-writes it into a decaying STM and a permanent LTM knowledge tree; serves
+# recall + introspection over MCP; consumes `memory.command` (soft/hard reset)
+# and publishes a CT-scan snapshot to `memory.metrics`.
+#
+#   docker compose up -d --build     # build + start, online + auto-restart
+#   docker compose logs -f           # watch it ingest + publish metrics
+#   docker compose down              # stop (both stores persist in the volume)
+#
+# Requires the Kafka broker (jarvis-kafka) on the shared jarvis-kafka_default
+# network — see ../kafka/ — with the topics created via ../kafka/create-topics.sh
+# (document.completed, memory.command, memory.metrics, dlq.memory, parking.lot).
+# Pithos (the artifact store) must be reachable for document text.
+name: jarvis-neurolithe
+
+services:
+  neurolithe:
+    build: .
+    image: neurolithe:latest
+    container_name: jarvis-neurolithe
+    restart: unless-stopped
+    # Optional .env (git-ignored) for secrets/overrides: a cloud LLM API key
+    # (OPENAI_API_KEY / GEMINI_API_KEY / NEUROLITHE_API_KEY) and the hard-reset
+    # guard token (NEUROLITHE_RESET_TOKEN). Local-only setups need neither.
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # --- bus + archive ---
+      # Reach the broker by container name over the shared network (DOCKER
+      # listener, advertised as jarvis-kafka:29092).
+      NEUROLITHE__KAFKA__BROKERS: jarvis-kafka:29092
+      NEUROLITHE__KAFKA__GROUP_ID: neurolithe
+      # Pithos on the NAS (LAN) — the feeder fetches pt:// document text here.
+      # The read token is a secret: set NEUROLITHE__PITHOS__TOKEN in .env (without
+      # it, reads return 401 and every document dead-letters to dlq.memory).
+      NEUROLITHE__PITHOS__BASE_URL: http://192.168.4.48:8080
+
+      # --- embeddings / LLM (CONFIGURABLE) ---
+      # Default = offline-first: local Ollama via the host. The feeder writes ONE
+      # embedding to both stores, so STM and LTM dimensions MUST match the model
+      # (nomic-embed-text = 768). To use a cloud provider instead, override these
+      # (e.g. provider=openai, embedding=text-embedding-3-small, dims=1536) and
+      # put the API key in .env.
+      NEUROLITHE__LLM__PROVIDER: custom
+      NEUROLITHE__LLM__MODEL: gemma2:2b
+      NEUROLITHE__LLM__EMBEDDING_MODEL: nomic-embed-text
+      NEUROLITHE__LLM__BASE_URL: http://host.docker.internal:11434/v1
+      NEUROLITHE__STM__VECTOR_DIMENSION: 768
+      NEUROLITHE__LTM__VECTOR_DIMENSION: 768
+
+      # --- behavior ---
+      NEUROLITHE__FEEDER__ENABLED: "true"
+      # Both SQLite stores live on the persistent named volume.
+      NEUROLITHE__STM__PATH: /data/neurolithe-stm.sqlite
+      NEUROLITHE__LTM__PATH: /data/neurolithe-ltm.sqlite
+      RUST_LOG: info
+    # Lets NEUROLITHE__LLM__BASE_URL reach a model server running on the mini
+    # host (Ollama). Harmless if a cloud provider is used instead.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - neurolithe-data:/data
+
+# Join the broker's existing Compose network instead of creating a new one.
+networks:
+  default:
+    name: jarvis-kafka_default
+    external: true
+
+volumes:
+  neurolithe-data:

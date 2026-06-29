@@ -94,6 +94,7 @@ mod tests {
             },
             pithos: PithosConfig {
                 base_url: "http://localhost:8080".into(),
+                token: String::new(),
             },
             sweep: SweepConfig {
                 interval_secs: 86_400,

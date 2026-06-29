@@ -9,3 +9,6 @@ docs/book
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
+
+# Secrets / local env (Pithos token, LLM API key, reset token)
+.env

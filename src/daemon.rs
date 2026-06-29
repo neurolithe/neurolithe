@@ -26,7 +26,7 @@ use crate::interfaces::command_consumer::{
 };
 use crate::interfaces::kafka_feeder::KafkaFeeder;
 use crate::interfaces::mcp_server::McpServer;
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use async_trait::async_trait;
 use std::sync::Arc;
 use std::time::Duration;
@@ -92,7 +92,10 @@ pub async fn run(config: AppConfig) -> Result<()> {
     // --- external adapters ---
     let llm: Arc<dyn LlmClient> =
         create_llm_client(&config.llm, resolve_api_key(&config.llm.provider));
-    let pithos: Arc<dyn ArtifactStore> = Arc::new(PithosClient::new(&config.pithos.base_url));
+    let pithos: Arc<dyn ArtifactStore> = Arc::new(PithosClient::new(
+        &config.pithos.base_url,
+        &config.pithos.token,
+    ));
 
     // --- services ---
     let app = Arc::new(NeurolitheApp::new(stm_repo.clone(), llm.clone(), 7.0));
@@ -185,9 +188,31 @@ pub async fn run(config: AppConfig) -> Result<()> {
         "[neurolithe] daemon running (feeder enabled: {})",
         config.feeder.enabled
     );
-    tokio::signal::ctrl_c()
-        .await
-        .context("waiting for shutdown signal")?;
+    shutdown_signal().await;
     eprintln!("[neurolithe] shutting down");
     Ok(())
+}
+
+/// Resolve on Ctrl-C (SIGINT) or, on Unix, SIGTERM — so `docker stop` shuts the
+/// daemon down gracefully instead of waiting for SIGKILL.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        match signal(SignalKind::terminate()) {
+            Ok(mut term) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = term.recv() => {}
+                }
+            }
+            Err(_) => {
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }

@@ -1,0 +1,10 @@
+# Keep the build context small + reproducible — only Cargo manifests + src are
+# copied in the Dockerfile, but exclude these explicitly in case the context is
+# widened later.
+target/
+*.sqlite
+*.sqlite-*
+.env
+.git/
+docs/
+*.md

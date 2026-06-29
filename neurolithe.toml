@@ -55,6 +55,9 @@ group_id = "neurolithe"
 # --- Pithos archive service: the feeder fetches pt:// document text over HTTP ---
 [pithos]
 base_url = "http://192.168.4.48:8080"
+# Bearer token for read access (a secret). Prefer the env var
+# NEUROLITHE__PITHOS__TOKEN / a .env file over committing it here. Empty = no auth.
+token = ""
 
 # --- Background schedulers (wired in later slices) ---
 [sweep]
