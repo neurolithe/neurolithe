@@ -38,19 +38,21 @@ services:
       NEUROLITHE__PITHOS__BASE_URL: http://192.168.4.48:8080
 
       # --- embeddings / LLM (CONFIGURABLE) ---
-      # Default = offline-first: local Ollama via the host. The feeder writes ONE
-      # embedding to both stores, so STM and LTM dimensions MUST match the model
-      # (nomic-embed-text = 768). To use a cloud provider instead, override these
-      # (e.g. provider=openai, embedding=text-embedding-3-small, dims=1536) and
-      # put the API key in .env.
-      # Chat model = the summarizer (gemma4 is installed on the mini host).
-      # Embedder = nomic-embed-text (768) — pull it first: `ollama pull nomic-embed-text`.
+      # Current = OpenRouter (cloud) for BOTH summarization and embeddings. The
+      # feeder writes ONE embedding to both stores, so STM and LTM dimensions
+      # MUST match the embedding model (text-embedding-3-small = 1536). The API
+      # key (NEUROLITHE_API_KEY=sk-or-...) lives in .env.
+      #
+      # NOTE (privacy): this sends document text to OpenRouter — a CLOUD egress,
+      # against JARVIS's offline-first default, chosen consciously. For a fully
+      # offline setup, point BASE_URL at a local Ollama (nomic-embed-text, dims
+      # 768) instead.
       NEUROLITHE__LLM__PROVIDER: custom
-      NEUROLITHE__LLM__MODEL: gemma4:latest
-      NEUROLITHE__LLM__EMBEDDING_MODEL: nomic-embed-text
-      NEUROLITHE__LLM__BASE_URL: http://host.docker.internal:11434/v1
-      NEUROLITHE__STM__VECTOR_DIMENSION: 768
-      NEUROLITHE__LTM__VECTOR_DIMENSION: 768
+      NEUROLITHE__LLM__MODEL: openai/gpt-4o-mini
+      NEUROLITHE__LLM__EMBEDDING_MODEL: openai/text-embedding-3-small
+      NEUROLITHE__LLM__BASE_URL: https://openrouter.ai/api/v1
+      NEUROLITHE__STM__VECTOR_DIMENSION: 1536
+      NEUROLITHE__LTM__VECTOR_DIMENSION: 1536
 
       # --- behavior ---
       NEUROLITHE__FEEDER__ENABLED: "true"
