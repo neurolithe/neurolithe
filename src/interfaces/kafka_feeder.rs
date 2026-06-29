@@ -11,6 +11,7 @@
 //! itself is exercised by a live-broker smoke test (deferred, like Chronos).
 
 use crate::application::ingestion::{DocumentCompleted, IngestionService};
+use crate::application::monitoring::FeederStats;
 use anyhow::{Context, Result};
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{CommitMode, Consumer, StreamConsumer};
@@ -31,6 +32,14 @@ pub enum FeedDecision {
     BadEvent(String),
     /// Un-parseable bytes — route to `parking.lot`.
     Park(String),
+}
+
+/// Current Unix time in seconds (for the last-ingest stat).
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// Classify a message by its key + payload (ADR-0004 routing). Pure.
@@ -55,9 +64,10 @@ const INGEST_ATTEMPTS: u32 = 3;
 const RETRY_BACKOFF: Duration = Duration::from_millis(500);
 
 pub struct KafkaFeeder {
-    consumer: StreamConsumer,
+    consumer: Arc<StreamConsumer>,
     producer: FutureProducer,
     ingestion: Arc<IngestionService>,
+    stats: Arc<FeederStats>,
     source_topic: String,
     dlq_topic: String,
     parking_topic: String,
@@ -65,7 +75,12 @@ pub struct KafkaFeeder {
 }
 
 impl KafkaFeeder {
-    pub fn new(brokers: &str, group_id: &str, ingestion: Arc<IngestionService>) -> Result<Self> {
+    pub fn new(
+        brokers: &str,
+        group_id: &str,
+        ingestion: Arc<IngestionService>,
+        stats: Arc<FeederStats>,
+    ) -> Result<Self> {
         let consumer: StreamConsumer = ClientConfig::new()
             .set("bootstrap.servers", brokers)
             .set("group.id", group_id)
@@ -81,14 +96,21 @@ impl KafkaFeeder {
             .context("creating dlq/parking producer")?;
 
         Ok(Self {
-            consumer,
+            consumer: Arc::new(consumer),
             producer,
             ingestion,
+            stats,
             source_topic: "document.completed".into(),
             dlq_topic: "dlq.memory".into(),
             parking_topic: "parking.lot".into(),
             group_id: group_id.into(),
         })
+    }
+
+    /// Shared handle to the consumer, so the command consumer can rewind it to
+    /// earliest after a hard reset.
+    pub fn consumer(&self) -> Arc<StreamConsumer> {
+        self.consumer.clone()
     }
 
     /// Consume forever: classify -> act -> commit. Never returns under normal
@@ -121,12 +143,14 @@ impl KafkaFeeder {
                         .await;
                 }
             }
-            FeedDecision::Ingest(event) => {
-                if let Err(e) = self.ingest_with_retry(&event).await {
+            FeedDecision::Ingest(event) => match self.ingest_with_retry(&event).await {
+                Ok(()) => self.stats.record_document(now_unix()),
+                Err(e) => {
+                    self.stats.record_error();
                     self.send_aside(msg, &self.dlq_topic, &format!("ingest failed: {e}"))
                         .await;
                 }
-            }
+            },
             FeedDecision::BadEvent(reason) => {
                 self.send_aside(msg, &self.dlq_topic, &reason).await;
             }

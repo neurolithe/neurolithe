@@ -32,6 +32,44 @@ impl RuntimeStats {
     }
 }
 
+/// Live feeder counters, shared (atomics) between the feeder loop that updates
+/// them and the metrics scheduler that reads them. Lag stays unknown (`-1`)
+/// until consumer-lag reporting is wired.
+#[derive(Debug, Default)]
+pub struct FeederStats {
+    errors: std::sync::atomic::AtomicU64,
+    documents: std::sync::atomic::AtomicU64,
+    /// Unix seconds of the last successful ingest; 0 = none yet.
+    last_ingest_unix: std::sync::atomic::AtomicI64,
+}
+
+impl FeederStats {
+    pub fn record_error(&self) {
+        self.errors
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Record a successful document ingest at `unix` seconds.
+    pub fn record_document(&self, unix: i64) {
+        self.documents
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.last_ingest_unix
+            .store(unix, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Project into a [`RuntimeStats`] for the metrics snapshot.
+    pub fn to_runtime(&self, sessions: u64) -> RuntimeStats {
+        use std::sync::atomic::Ordering::Relaxed;
+        let last = self.last_ingest_unix.load(Relaxed);
+        RuntimeStats {
+            sessions,
+            feeder_lag: -1,
+            feeder_errors: self.errors.load(Relaxed),
+            last_backfill_unix: (last != 0).then_some(last),
+        }
+    }
+}
+
 /// The full CT-scan snapshot — the value published to `memory.metrics`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MemoryMetrics {

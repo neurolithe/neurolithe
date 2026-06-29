@@ -14,7 +14,10 @@ use async_trait::async_trait;
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{CommitMode, Consumer, StreamConsumer};
 use rdkafka::message::Message;
+use rdkafka::util::Timeout;
+use rdkafka::{Offset, TopicPartitionList};
 use std::sync::Arc;
+use std::time::Duration;
 
 /// Rewinds the feeder's consumer group to the earliest offset, so a hard reset
 /// replays `document.completed` and re-derives LTM (+ STM). Implemented by the
@@ -22,6 +25,46 @@ use std::sync::Arc;
 #[async_trait]
 pub trait FeederRewind: Send + Sync {
     async fn rewind_to_earliest(&self) -> Result<()>;
+}
+
+/// Rewinds a shared feeder consumer to the beginning of its assigned partitions.
+pub struct ConsumerRewind {
+    consumer: Arc<StreamConsumer>,
+}
+
+impl ConsumerRewind {
+    pub fn new(consumer: Arc<StreamConsumer>) -> Self {
+        Self { consumer }
+    }
+}
+
+#[async_trait]
+impl FeederRewind for ConsumerRewind {
+    async fn rewind_to_earliest(&self) -> Result<()> {
+        let assignment = self
+            .consumer
+            .assignment()
+            .context("reading feeder assignment")?;
+        let mut tpl = TopicPartitionList::new();
+        for elem in assignment.elements() {
+            tpl.add_partition_offset(elem.topic(), elem.partition(), Offset::Beginning)
+                .context("building rewind offsets")?;
+        }
+        self.consumer
+            .seek_partitions(tpl, Timeout::After(Duration::from_secs(5)))
+            .context("seeking feeder to earliest")?;
+        Ok(())
+    }
+}
+
+/// No-op rewind for when the feeder is disabled (hard reset still wipes stores).
+pub struct NoopRewind;
+
+#[async_trait]
+impl FeederRewind for NoopRewind {
+    async fn rewind_to_earliest(&self) -> Result<()> {
+        Ok(())
+    }
 }
 
 pub struct CommandConsumer {
