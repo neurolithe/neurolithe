@@ -498,6 +498,30 @@ impl MemoryRepository for SqliteMemoryRepository {
         Ok(())
     }
 
+    fn delete_nodes_by_data_id(&self, data_id: &str) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        // Match nodes whose payload carries this dataId. Edges + vectors go
+        // first (FK / index hygiene); deleting nodes fires the fts delete trigger.
+        tx.execute(
+            "DELETE FROM edges WHERE source_id IN
+                (SELECT id FROM nodes WHERE json_extract(payload, '$.dataId') = ?1)
+             OR target_id IN
+                (SELECT id FROM nodes WHERE json_extract(payload, '$.dataId') = ?1)",
+            params![data_id],
+        )?;
+        tx.execute(
+            "DELETE FROM vec_nodes WHERE node_id IN
+                (SELECT id FROM nodes WHERE json_extract(payload, '$.dataId') = ?1)",
+            params![data_id],
+        )?;
+        tx.execute(
+            "DELETE FROM nodes WHERE json_extract(payload, '$.dataId') = ?1",
+            params![data_id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     fn reset_store(&self) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
         // FK-safe order: edges reference nodes, nodes reference episodes.

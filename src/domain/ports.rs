@@ -75,6 +75,12 @@ pub trait MemoryRepository {
     /// the STM connection); LTM lives in a separate connection/file and is
     /// untouched. All tenants and CCL layers are cleared.
     fn reset_store(&self) -> Result<()>;
+
+    /// Delete STM nodes carrying a given `dataId` in their payload (and their
+    /// vectors/edges). Used by the feeder's tombstone path to forget a document
+    /// from working memory. Best-effort: the conflict resolver may have merged a
+    /// document into a shared node, in which case nothing distinct remains here.
+    fn delete_nodes_by_data_id(&self, data_id: &str) -> Result<()>;
 }
 
 use serde::{Deserialize, Serialize};
