@@ -193,6 +193,85 @@ impl LtmRepository for SqliteLtmRepository {
             })?;
         Ok(node)
     }
+
+    fn find_similar_concepts(
+        &self,
+        embedding: &[f32],
+        max_distance: f64,
+        limit: usize,
+    ) -> Result<Vec<(TreeNode, f64)>> {
+        let embedding_bytes: &[u8] = unsafe {
+            std::slice::from_raw_parts(
+                embedding.as_ptr() as *const u8,
+                std::mem::size_of_val(embedding),
+            )
+        };
+
+        // Node columns first (mapped by row_to_node), then the vector distance.
+        let mut stmt = self.conn.prepare(
+            "SELECT n.id, n.name, n.summary, n.kind, n.permanent, n.created_at, n.updated_at,
+                    v.distance
+             FROM vec_ltm v
+             JOIN tree_nodes n ON n.id = v.node_id
+             WHERE v.embedding MATCH ?1 AND k = ?2
+               AND n.kind IN ('spine', 'grown')
+               AND v.distance <= ?3
+             ORDER BY v.distance ASC",
+        )?;
+
+        let rows = stmt.query_map(
+            params![embedding_bytes, limit as i64, max_distance],
+            |row| {
+                let node = Self::row_to_node(row)?;
+                let distance: f64 = row.get(7)?;
+                Ok((node, distance))
+            },
+        )?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    fn get_inbox(&self) -> Result<Option<TreeNode>> {
+        let node = self
+            .conn
+            .query_row(
+                "SELECT id, name, summary, kind, permanent, created_at, updated_at
+                 FROM tree_nodes WHERE kind = 'inbox' ORDER BY id LIMIT 1",
+                [],
+                Self::row_to_node,
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(other),
+            })?;
+        Ok(node)
+    }
+
+    fn update_summary(&self, node_id: i64, summary: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE tree_nodes SET summary = ?1, updated_at = CURRENT_TIMESTAMP WHERE id = ?2",
+            params![summary, node_id],
+        )?;
+        Ok(())
+    }
+
+    fn delete_node(&self, node_id: i64) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        // Edges first (FK to tree_nodes), then vector + leaves, then the node
+        // itself (fires the fts_ltm delete trigger).
+        tx.execute(
+            "DELETE FROM tree_edges WHERE parent_id = ?1 OR child_id = ?1",
+            params![node_id],
+        )?;
+        tx.execute("DELETE FROM vec_ltm WHERE node_id = ?1", params![node_id])?;
+        tx.execute(
+            "DELETE FROM leaves WHERE tree_node_id = ?1",
+            params![node_id],
+        )?;
+        tx.execute("DELETE FROM tree_nodes WHERE id = ?1", params![node_id])?;
+        tx.commit()?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

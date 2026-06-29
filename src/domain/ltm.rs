@@ -135,4 +135,25 @@ pub trait LtmRepository {
 
     /// The leaf node carrying a given `data_id`, if any.
     fn get_node_by_data_id(&self, data_id: &str) -> Result<Option<TreeNode>>;
+
+    /// Concept nodes (`spine`/`grown`) whose summary embedding is within
+    /// `max_distance` of `embedding`, nearest first. Used by placement to find
+    /// the best home for a new document. Leaves and the inbox are never match
+    /// targets. Returns each match with its vector distance.
+    fn find_similar_concepts(
+        &self,
+        embedding: &[f32],
+        max_distance: f64,
+        limit: usize,
+    ) -> Result<Vec<(TreeNode, f64)>>;
+
+    /// The inbox holding node (the placement fallback), if seeded.
+    fn get_inbox(&self) -> Result<Option<TreeNode>>;
+
+    /// Replace a node's rolling summary (and bump `updated_at`).
+    fn update_summary(&self, node_id: i64, summary: &str) -> Result<()>;
+
+    /// Delete a node and everything attached to it: its edges (either
+    /// direction), its vector, and its leaf rows. Used by tombstone/forget.
+    fn delete_node(&self, node_id: i64) -> Result<()>;
 }
