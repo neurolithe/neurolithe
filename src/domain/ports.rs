@@ -123,3 +123,25 @@ pub trait LlmClient {
     /// Compress/summarize old dialogue messages into a dense summary
     async fn compress_context(&self, messages: &str) -> Result<String>;
 }
+
+/// Outcome of fetching an artifact's text from the archive.
+///
+/// Missing is a normal, expected case — the claim-check bytes may be gone
+/// before a tombstone compacts — so the feeder skips gracefully rather than
+/// treating it as an error (ADR-0004 "empty", not "error").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FetchOutcome {
+    Found(String),
+    Missing,
+}
+
+/// Read-only access to the artifact archive (Pithos). The feeder dereferences
+/// a `pt://` pointer from a `document.completed` event to pull the page text it
+/// needs to distill. NeuroLithe never writes — Pithos stays the source of truth.
+#[async_trait::async_trait]
+pub trait ArtifactStore: Send + Sync {
+    /// Fetch the UTF-8 text artifact at a `pt://` URI. Returns
+    /// [`FetchOutcome::Missing`] for a 404/gone artifact; errors only on
+    /// transient failures (network, 5xx) the caller may retry.
+    async fn fetch_text(&self, uri: &str) -> Result<FetchOutcome>;
+}
