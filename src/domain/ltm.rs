@@ -171,4 +171,23 @@ pub trait LtmRepository {
     /// The document leaves attached directly under a node (its leaf children),
     /// each with `data_id` + provenance. Used by drill/recall.
     fn get_child_leaves(&self, parent_id: i64) -> Result<Vec<Leaf>>;
+
+    /// CT-scan statistics for the LTM tree (slice 9).
+    fn ltm_stats(&self) -> Result<LtmStats>;
+}
+
+/// A snapshot of LTM tree health for the metrics CT scan.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LtmStats {
+    pub tree_nodes: i64,
+    /// Document leaf nodes (kind = leaf).
+    pub leaves: i64,
+    pub edges: i64,
+    /// Documents sitting in the inbox (unsorted — a placement-quality signal).
+    pub inbox_docs: i64,
+    /// Leaf nodes with no parent edge (disconnected — a health signal; normally 0).
+    pub orphan_leaves: i64,
+    /// Longest root-to-node path (tree height).
+    pub max_depth: i64,
+    pub db_size_bytes: i64,
 }

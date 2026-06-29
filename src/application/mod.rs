@@ -3,6 +3,7 @@ pub mod distill;
 pub mod ingestion;
 pub mod ltm_placement;
 pub mod ltm_retrieval;
+pub mod monitoring;
 pub mod reset_service;
 pub mod retrieval;
 pub mod scheduler;

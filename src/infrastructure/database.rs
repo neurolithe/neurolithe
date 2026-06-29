@@ -23,6 +23,14 @@ pub fn init_db(path: Option<&impl AsRef<Path>>) -> rusqlite::Result<Connection> 
     Ok(conn)
 }
 
+/// On-disk size of a SQLite database in bytes (`page_count * page_size`). For
+/// an in-memory DB this is the in-memory footprint. Used by the metrics CT scan.
+pub fn db_size_bytes(conn: &Connection) -> rusqlite::Result<i64> {
+    let page_count: i64 = conn.query_row("PRAGMA page_count", [], |r| r.get(0))?;
+    let page_size: i64 = conn.query_row("PRAGMA page_size", [], |r| r.get(0))?;
+    Ok(page_count * page_size)
+}
+
 /// The two independent SQLite memory stores that make up NeuroLithe V2.
 ///
 /// `stm` is today's decaying fact engine; `ltm` is the permanent knowledge

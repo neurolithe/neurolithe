@@ -1,5 +1,6 @@
 use crate::domain::models::{Episode, MemoryNode, TenantId};
 use crate::domain::ports::MemoryRepository;
+use crate::infrastructure::database::db_size_bytes;
 use anyhow::Result;
 use rusqlite::{Connection, params};
 
@@ -496,6 +497,46 @@ impl MemoryRepository for SqliteMemoryRepository {
         }
         tx.commit()?;
         Ok(())
+    }
+
+    fn stm_stats(&self) -> Result<crate::domain::ports::StmStats> {
+        let active: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM nodes WHERE status = 'active'",
+            [],
+            |r| r.get(0),
+        )?;
+        let archived: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM nodes WHERE status = 'archived'",
+            [],
+            |r| r.get(0),
+        )?;
+        let avg_relevance: f64 = self.conn.query_row(
+            "SELECT COALESCE(AVG(relevance_score), 0) FROM nodes WHERE status = 'active'",
+            [],
+            |r| r.get(0),
+        )?;
+
+        // 5 relevance bins; score 1.0 clamps into the top bin.
+        let mut decay_histogram = vec![0i64; 5];
+        let mut stmt = self.conn.prepare(
+            "SELECT MIN(4, CAST(relevance_score * 5 AS INTEGER)) AS bin, COUNT(*)
+             FROM nodes WHERE status = 'active' GROUP BY bin",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?;
+        for row in rows {
+            let (bin, count) = row?;
+            if (0..5).contains(&bin) {
+                decay_histogram[bin as usize] = count;
+            }
+        }
+
+        Ok(crate::domain::ports::StmStats {
+            active_nodes: active,
+            archived_nodes: archived,
+            avg_relevance,
+            decay_histogram,
+            db_size_bytes: db_size_bytes(&self.conn)?,
+        })
     }
 
     fn delete_nodes_by_data_id(&self, data_id: &str) -> Result<()> {

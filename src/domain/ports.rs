@@ -81,6 +81,22 @@ pub trait MemoryRepository {
     /// from working memory. Best-effort: the conflict resolver may have merged a
     /// document into a shared node, in which case nothing distinct remains here.
     fn delete_nodes_by_data_id(&self, data_id: &str) -> Result<()>;
+
+    /// CT-scan statistics for the STM store (slice 9).
+    fn stm_stats(&self) -> Result<StmStats>;
+}
+
+/// A snapshot of STM health for the metrics CT scan.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StmStats {
+    pub active_nodes: i64,
+    pub archived_nodes: i64,
+    /// Mean relevance over active nodes (0.0 if none).
+    pub avg_relevance: f64,
+    /// Active-node counts bucketed by relevance into 5 bins
+    /// ([0,0.2),[0.2,0.4),[0.4,0.6),[0.6,0.8),[0.8,1.0]).
+    pub decay_histogram: Vec<i64>,
+    pub db_size_bytes: i64,
 }
 
 use serde::{Deserialize, Serialize};

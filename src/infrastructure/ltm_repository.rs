@@ -322,6 +322,49 @@ impl LtmRepository for SqliteLtmRepository {
         }
         Ok(leaves)
     }
+
+    fn ltm_stats(&self) -> Result<crate::domain::ltm::LtmStats> {
+        let count =
+            |sql: &str| -> rusqlite::Result<i64> { self.conn.query_row(sql, [], |r| r.get(0)) };
+
+        let tree_nodes = count("SELECT COUNT(*) FROM tree_nodes")?;
+        let leaves = count("SELECT COUNT(*) FROM tree_nodes WHERE kind = 'leaf'")?;
+        let edges = count("SELECT COUNT(*) FROM tree_edges")?;
+        let inbox_docs = count(
+            "SELECT COUNT(*) FROM tree_edges e
+             JOIN tree_nodes p ON e.parent_id = p.id
+             JOIN tree_nodes c ON e.child_id = c.id
+             WHERE p.kind = 'inbox' AND c.kind = 'leaf'",
+        )?;
+        let orphan_leaves = count(
+            "SELECT COUNT(*) FROM tree_nodes n
+             WHERE n.kind = 'leaf'
+               AND NOT EXISTS (SELECT 1 FROM tree_edges e WHERE e.child_id = n.id)",
+        )?;
+
+        // Longest root-to-node path. Roots are parentless; descend the DAG.
+        let max_depth: i64 = self.conn.query_row(
+            "WITH RECURSIVE d(id, depth) AS (
+                 SELECT id, 0 FROM tree_nodes n
+                 WHERE NOT EXISTS (SELECT 1 FROM tree_edges e WHERE e.child_id = n.id)
+                 UNION ALL
+                 SELECT e.child_id, d.depth + 1 FROM d JOIN tree_edges e ON e.parent_id = d.id
+             )
+             SELECT COALESCE(MAX(depth), 0) FROM d",
+            [],
+            |r| r.get(0),
+        )?;
+
+        Ok(crate::domain::ltm::LtmStats {
+            tree_nodes,
+            leaves,
+            edges,
+            inbox_docs,
+            orphan_leaves,
+            max_depth,
+            db_size_bytes: crate::infrastructure::database::db_size_bytes(&self.conn)?,
+        })
+    }
 }
 
 #[cfg(test)]
