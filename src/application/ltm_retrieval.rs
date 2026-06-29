@@ -119,6 +119,28 @@ impl LtmRetrieval {
         })
     }
 
+    /// A branch of the tree: the node and its concept descendants down to
+    /// `depth` (leaves excluded, like [`map`](Self::map)). `None` if the node
+    /// does not exist.
+    pub fn subtree(&self, node_id: i64, depth: usize) -> Result<Option<MapNode>> {
+        if depth == 0 {
+            return Ok(None);
+        }
+        match self.repo.get_node(node_id)? {
+            Some(node) => Ok(Some(self.build_map(&node, depth)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// All distinct ancestors of a node (nearest first) as views — for framing.
+    pub fn ancestors(&self, node_id: i64) -> Result<Vec<NodeView>> {
+        Ok(self
+            .collect_ancestors(node_id)?
+            .iter()
+            .map(NodeView::from)
+            .collect())
+    }
+
     /// A node's direct children (concepts and leaves) with their summaries.
     pub fn expand(&self, node_id: i64) -> Result<Option<ExpandResult>> {
         let Some(node) = self.repo.get_node(node_id)? else {

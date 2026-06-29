@@ -1,6 +1,7 @@
 pub mod app;
 pub mod distill;
 pub mod ingestion;
+pub mod introspection;
 pub mod ltm_placement;
 pub mod ltm_retrieval;
 pub mod monitoring;

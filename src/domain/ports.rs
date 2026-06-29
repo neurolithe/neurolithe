@@ -84,6 +84,29 @@ pub trait MemoryRepository {
 
     /// CT-scan statistics for the STM store (slice 9).
     fn stm_stats(&self) -> Result<StmStats>;
+
+    /// List STM facts (most-relevant first) for introspection, optionally
+    /// filtered by status (`active`/`archived`).
+    fn list_node_summaries(
+        &self,
+        limit: usize,
+        status: Option<&str>,
+    ) -> Result<Vec<StmNodeSummary>>;
+
+    /// How many STM nodes carry a given `dataId` (for `trace_dataId`).
+    fn count_by_data_id(&self, data_id: &str) -> Result<i64>;
+}
+
+/// A single STM fact, flattened for the introspection CT scan.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct StmNodeSummary {
+    pub fact: String,
+    pub status: String,
+    pub relevance_score: f64,
+    pub support_count: i32,
+    pub ccl: String,
+    pub last_accessed_at: Option<String>,
+    pub data_id: Option<String>,
 }
 
 /// A snapshot of STM health for the metrics CT scan.

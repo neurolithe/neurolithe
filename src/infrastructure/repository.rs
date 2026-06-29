@@ -539,6 +539,43 @@ impl MemoryRepository for SqliteMemoryRepository {
         })
     }
 
+    fn list_node_summaries(
+        &self,
+        limit: usize,
+        status: Option<&str>,
+    ) -> Result<Vec<crate::domain::ports::StmNodeSummary>> {
+        // Most-relevant first; optional status filter. NULL status filter via
+        // `?1 IS NULL` keeps a single prepared statement.
+        let mut stmt = self.conn.prepare(
+            "SELECT json_extract(payload, '$.fact'), status, relevance_score, support_count,
+                    ccl, last_accessed_at, json_extract(payload, '$.dataId')
+             FROM nodes
+             WHERE (?1 IS NULL OR status = ?1)
+             ORDER BY relevance_score DESC, last_accessed_at DESC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![status, limit as i64], |row| {
+            Ok(crate::domain::ports::StmNodeSummary {
+                fact: row.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                status: row.get(1)?,
+                relevance_score: row.get(2)?,
+                support_count: row.get(3)?,
+                ccl: row.get(4)?,
+                last_accessed_at: row.get(5)?,
+                data_id: row.get(6)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    fn count_by_data_id(&self, data_id: &str) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM nodes WHERE json_extract(payload, '$.dataId') = ?1",
+            params![data_id],
+            |r| r.get(0),
+        )?)
+    }
+
     fn delete_nodes_by_data_id(&self, data_id: &str) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
         // Match nodes whose payload carries this dataId. Edges + vectors go

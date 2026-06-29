@@ -14,16 +14,24 @@ fn main() -> anyhow::Result<()> {
     let config = AppConfig::load()?;
 
     // 2. Initialize the two memory stores (STM decaying engine + permanent LTM).
-    //    The LTM connection is opened here; its schema + feeder/retrieval wiring
-    //    land in later slices (the daemon assembly in slice 11 owns both).
+    //    The full concurrent daemon (feeder + command consumer + schedulers)
+    //    lands in slice 11; for now main serves the MCP door over both stores.
     let stores = crate::infrastructure::database::init_stores(&config)?;
-    let crate::infrastructure::database::MemoryStores {
-        stm: conn,
-        ltm: _ltm,
-    } = stores;
+    let crate::infrastructure::database::MemoryStores { stm, ltm } = stores;
 
-    let db_repo: std::sync::Arc<dyn crate::domain::ports::MemoryRepository> =
-        std::sync::Arc::new(crate::infrastructure::repository::SqliteMemoryRepository::new(conn));
+    let stm_repo: std::sync::Arc<dyn crate::domain::ports::MemoryRepository> =
+        std::sync::Arc::new(crate::infrastructure::repository::SqliteMemoryRepository::new(stm));
+    let ltm_repo: std::sync::Arc<dyn crate::domain::ltm::LtmRepository> =
+        std::sync::Arc::new(crate::infrastructure::ltm_repository::SqliteLtmRepository::new(ltm));
+    // Ensure the curated spine exists (idempotent).
+    ltm_repo.seed_spine()?;
+
+    let introspection = std::sync::Arc::new(
+        crate::application::introspection::IntrospectionService::new(
+            stm_repo.clone(),
+            ltm_repo.clone(),
+        ),
+    );
 
     // 3. Initialize LLM Client
     let api_key = match config.llm.provider {
@@ -41,7 +49,7 @@ fn main() -> anyhow::Result<()> {
     let llm_client = create_llm_client(&config.llm, api_key);
 
     let app = std::sync::Arc::new(crate::application::app::NeurolitheApp::new(
-        db_repo, llm_client, 7.0,
+        stm_repo, llm_client, 7.0,
     ));
 
     // We create the Tokio runtime here since `main` is not async
@@ -49,7 +57,7 @@ fn main() -> anyhow::Result<()> {
     let rt = Runtime::new()?;
 
     rt.block_on(async {
-        let server = McpServer::new(app);
+        let server = McpServer::new(app, introspection);
         server.run_stdio().await
     })
 }
