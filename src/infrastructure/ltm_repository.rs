@@ -34,14 +34,16 @@ impl SqliteLtmRepository {
             updated_at: row.get(6)?,
         })
     }
+}
 
+impl LtmRepository for SqliteLtmRepository {
     /// Seed the curated spine (Reza's main branches + an inbox) under a root,
     /// once. Idempotent: a no-op if the tree already has any nodes.
     ///
     /// Spine nodes are seeded without embeddings — vectors are added when the
-    /// embedding model is wired (feeder, slice 6). Called by the daemon on
-    /// startup (slice 11).
-    pub fn seed_spine(&self) -> Result<()> {
+    /// embedding model is wired (feeder). Called by the daemon on startup
+    /// (slice 11) and again after a hard reset.
+    fn seed_spine(&self) -> Result<()> {
         let existing: i64 = self
             .conn
             .query_row("SELECT COUNT(*) FROM tree_nodes", [], |r| r.get(0))?;
@@ -87,9 +89,18 @@ impl SqliteLtmRepository {
 
         Ok(())
     }
-}
 
-impl LtmRepository for SqliteLtmRepository {
+    fn reset_store(&self) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        // FK-safe order; deleting tree_nodes fires the fts_ltm delete trigger.
+        tx.execute("DELETE FROM tree_edges", [])?;
+        tx.execute("DELETE FROM vec_ltm", [])?;
+        tx.execute("DELETE FROM leaves", [])?;
+        tx.execute("DELETE FROM tree_nodes", [])?;
+        tx.commit()?;
+        Ok(())
+    }
+
     fn create_node(&self, node: &TreeNode, embedding: Option<&[f32]>) -> Result<i64> {
         let tx = self.conn.unchecked_transaction()?;
         tx.execute(

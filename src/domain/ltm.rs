@@ -157,6 +157,14 @@ pub trait LtmRepository {
     /// direction), its vector, and its leaf rows. Used by tombstone/forget.
     fn delete_node(&self, node_id: i64) -> Result<()>;
 
+    /// Seed the curated spine (root + main branches + inbox) once. Idempotent —
+    /// a no-op if the tree already has nodes. Re-run after a hard reset.
+    fn seed_spine(&self) -> Result<()>;
+
+    /// Wipe the entire tree (nodes, edges, leaves, vectors), keeping the schema.
+    /// Used by hard reset; the caller re-seeds the spine afterward.
+    fn reset_store(&self) -> Result<()>;
+
     /// Top-level nodes — those with no parent edge. The map starts here.
     fn get_roots(&self) -> Result<Vec<TreeNode>>;
 
