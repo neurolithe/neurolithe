@@ -13,9 +13,14 @@ fn main() -> anyhow::Result<()> {
     // 1. Load configuration
     let config = AppConfig::load()?;
 
-    // 2. Initialize Database with Configured Vector Dimension
-    let conn = crate::infrastructure::database::init_db(config.database.path.as_ref())?;
-    crate::infrastructure::schema::init_schema(&conn, config.database.vector_dimension)?;
+    // 2. Initialize the two memory stores (STM decaying engine + permanent LTM).
+    //    The LTM connection is opened here; its schema + feeder/retrieval wiring
+    //    land in later slices (the daemon assembly in slice 11 owns both).
+    let stores = crate::infrastructure::database::init_stores(&config)?;
+    let crate::infrastructure::database::MemoryStores {
+        stm: conn,
+        ltm: _ltm,
+    } = stores;
 
     let db_repo: std::sync::Arc<dyn crate::domain::ports::MemoryRepository> =
         std::sync::Arc::new(crate::infrastructure::repository::SqliteMemoryRepository::new(conn));
