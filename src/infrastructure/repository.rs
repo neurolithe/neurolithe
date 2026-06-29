@@ -497,6 +497,20 @@ impl MemoryRepository for SqliteMemoryRepository {
         tx.commit()?;
         Ok(())
     }
+
+    fn reset_store(&self) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        // FK-safe order: edges reference nodes, nodes reference episodes.
+        // Deleting from `nodes` fires the `nodes_ad` trigger, keeping the
+        // `fts_nodes` FTS index in sync — so it is not cleared directly.
+        tx.execute("DELETE FROM edges", [])?;
+        tx.execute("DELETE FROM vec_nodes", [])?;
+        tx.execute("DELETE FROM nodes", [])?;
+        tx.execute("DELETE FROM episodes", [])?;
+        tx.execute("DELETE FROM ccl_registry", [])?;
+        tx.commit()?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -689,5 +703,138 @@ mod tests {
 
         let export_b = repo.export_tenant(&t2).unwrap();
         assert!(export_b.contains("B fact")); // B untouched
+    }
+
+    // --- Slice 2: decay sweep + boost + soft-reset (STM) ---
+
+    /// Concrete repo (small vector dim) so tests can read scores/counts back
+    /// off the private connection.
+    fn setup_concrete() -> SqliteMemoryRepository {
+        let conn = init_db(None as Option<&String>).unwrap();
+        init_schema(&conn, 4).unwrap();
+        SqliteMemoryRepository::new(conn)
+    }
+
+    fn active_node(tenant: &TenantId, fact: &str, score: f64) -> MemoryNode {
+        MemoryNode {
+            id: None,
+            tenant_id: tenant.clone(),
+            source_episode_id: None,
+            payload: json!({ "fact": fact }),
+            status: "active".into(),
+            ccl: "reality".into(),
+            is_explicit: false,
+            support_count: 1,
+            relevance_score: score,
+        }
+    }
+
+    fn score_status(repo: &SqliteMemoryRepository, id: i64) -> (f64, String) {
+        repo.conn
+            .query_row(
+                "SELECT relevance_score, status FROM nodes WHERE id = ?1",
+                params![id],
+                |r| Ok((r.get::<_, f64>(0)?, r.get::<_, String>(1)?)),
+            )
+            .unwrap()
+    }
+
+    fn count(conn: &Connection, table: &str) -> i64 {
+        conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap()
+    }
+
+    /// One sweep pass decays active nodes by the half-life factor and flips
+    /// any node that falls below 0.1 to `archived`.
+    #[test]
+    fn test_sweep_decays_active_and_archives_below_threshold() {
+        use crate::domain::decay::DecayEngine;
+        let repo = setup_concrete();
+        let t = TenantId("t".into());
+
+        // half_life = 1 day, sweep applies 1 day -> decay factor 0.5.
+        let healthy = repo
+            .store_node(&active_node(&t, "healthy", 1.0), &[0.0; 4])
+            .unwrap();
+        // 0.15 * 0.5 = 0.075 < 0.1 -> archived.
+        let faint = repo
+            .store_node(&active_node(&t, "faint", 0.15), &[0.1; 4])
+            .unwrap();
+
+        repo.sweep_decay(&DecayEngine::new(1.0)).unwrap();
+
+        let (h_score, h_status) = score_status(&repo, healthy);
+        assert!((h_score - 0.5).abs() < 1e-9, "healthy decayed to 0.5");
+        assert_eq!(h_status, "active");
+
+        let (f_score, f_status) = score_status(&repo, faint);
+        assert!(f_score < 0.1, "faint decayed below threshold");
+        assert_eq!(f_status, "archived");
+    }
+
+    /// Reading a node (boost) resets its relevance score to 1.0 — querying is
+    /// reinforcement, the counterforce to decay.
+    #[test]
+    fn test_boost_relevance_resets_score() {
+        let repo = setup_concrete();
+        let t = TenantId("t".into());
+        let id = repo
+            .store_node(&active_node(&t, "faded", 0.2), &[0.0; 4])
+            .unwrap();
+
+        repo.boost_relevance(&[id]).unwrap();
+
+        let (score, status) = score_status(&repo, id);
+        assert!((score - 1.0).abs() < 1e-9, "boost resets to 1.0");
+        assert_eq!(status, "active");
+    }
+
+    /// Soft reset wipes the STM store (all tables) but a separate store
+    /// connection (standing in for LTM) keeps its rows — proof the reset is
+    /// scoped to one store.
+    #[test]
+    fn test_reset_store_empties_stm_only() {
+        let repo = setup_concrete();
+        let t = TenantId("t".into());
+
+        let ep = repo
+            .store_episode(&Episode {
+                id: None,
+                tenant_id: t.clone(),
+                session_id: crate::domain::models::SessionId("s".into()),
+                raw_dialogue: "hello".into(),
+                ccl: "reality".into(),
+                created_at: None,
+            })
+            .unwrap();
+        let mut node = active_node(&t, "stm fact", 1.0);
+        node.source_episode_id = Some(ep);
+        repo.store_node(&node, &[0.0; 4]).unwrap();
+        repo.store_ccl_definition(&crate::domain::models::CclDefinition {
+            id: None,
+            tenant_id: t.clone(),
+            name: "dream".into(),
+            description: "d".into(),
+        })
+        .unwrap();
+
+        // A second, independent store connection with its own row (the "LTM").
+        let ltm = init_db(None as Option<&String>).unwrap();
+        ltm.execute("CREATE TABLE keep (v TEXT)", []).unwrap();
+        ltm.execute("INSERT INTO keep (v) VALUES ('ltm-row')", [])
+            .unwrap();
+
+        assert!(count(&repo.conn, "nodes") > 0);
+
+        repo.reset_store().unwrap();
+
+        for table in ["nodes", "episodes", "edges", "ccl_registry", "vec_nodes"] {
+            assert_eq!(count(&repo.conn, table), 0, "{table} should be empty");
+        }
+        // The other store is untouched.
+        let ltm_rows: i64 = ltm
+            .query_row("SELECT COUNT(*) FROM keep", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(ltm_rows, 1, "LTM store survives a soft reset");
     }
 }

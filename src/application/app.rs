@@ -38,6 +38,18 @@ impl NeurolitheApp {
         }
     }
 
+    /// Run one STM decay sweep (age-prioritization). Scheduled periodically by
+    /// the daemon (see `scheduler::run_periodic`); also callable on demand.
+    pub async fn run_decay_sweep(&self) -> Result<()> {
+        self.sleep_worker.run_decay_sweep().await
+    }
+
+    /// Soft reset — wipe the STM store only. The permanent LTM store lives in a
+    /// separate connection/file and is untouched. Destructive.
+    pub fn soft_reset(&self) -> Result<()> {
+        self.memory_repo.reset_store()
+    }
+
     /// Push dialogue to Short-Term Memory (Flow 1 from blueprint).
     /// Compresses old messages, returns optimized context window,
     /// and queues the new dialogue for background fact extraction.

@@ -68,6 +68,13 @@ pub trait MemoryRepository {
 
     /// Apply decay sweep across all active memory nodes
     fn sweep_decay(&self, engine: &crate::domain::decay::DecayEngine) -> Result<()>;
+
+    /// Wipe every record in this store, keeping the schema intact.
+    ///
+    /// Used by V2 reset: a soft reset wipes the STM store only (this call on
+    /// the STM connection); LTM lives in a separate connection/file and is
+    /// untouched. All tenants and CCL layers are cleared.
+    fn reset_store(&self) -> Result<()>;
 }
 
 use serde::{Deserialize, Serialize};
