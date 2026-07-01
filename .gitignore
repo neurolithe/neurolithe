@@ -9,3 +9,9 @@ docs/book
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
+
+# Secrets / local env (Pithos token, LLM API key, reset token)
+.env
+
+# Internal design/audit docs — kept local only, not for the public repo
+/design-docs

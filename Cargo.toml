@@ -16,6 +16,9 @@ async-trait = "0.1.89"
 config = "0.15.19"
 dotenvy = "0.15.7"
 libsqlite3-sys = "0.36.0"
+# Kafka feeder + command consumer + metrics producer. Default features build a
+# vendored librdkafka from source (matches Cadmus/Ledger/Chronos; no system lib).
+rdkafka = "0.39.0"
 reqwest = { version = "0.13.2", features = ["json", "rustls"] }
 rusqlite = { version = "0.38.0", features = ["bundled"] }
 serde = { version = "1.0.228", features = ["derive"] }
@@ -26,3 +29,6 @@ tokio = { version = "1.49.0", features = ["full"] }
 
 [dev-dependencies]
 tempfile = "3.25.0"
+# test-util enables the paused virtual clock (#[tokio::test(start_paused)])
+# used to test the scheduler's interval firing deterministically.
+tokio = { version = "1.49.0", features = ["full", "test-util"] }

@@ -103,6 +103,99 @@ pub fn init_schema(conn: &Connection, vector_dimension: usize) -> rusqlite::Resu
     Ok(())
 }
 
+/// Initialize the Long-Term Memory schema (the permanent knowledge tree) in the
+/// LTM database. Creates `tree_nodes`, `tree_edges` (multi-parent DAG),
+/// `leaves` (`dataId` references), the `vec_ltm` sqlite-vec index at the LTM
+/// dimension, and `fts_ltm` over node summaries with sync triggers. Idempotent.
+pub fn init_ltm_schema(conn: &Connection, vector_dimension: usize) -> rusqlite::Result<()> {
+    // 0. Concept / leaf nodes. `permanent` is always true — LTM never decays.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS tree_nodes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            summary TEXT NOT NULL DEFAULT '',
+            kind TEXT NOT NULL DEFAULT 'grown',
+            permanent BOOLEAN NOT NULL DEFAULT 1,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )",
+        [],
+    )?;
+
+    // 1. Parent -> child edges. The composite PK allows a node to sit under
+    //    many parents (DAG) while preventing duplicate same-parent edges.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS tree_edges (
+            parent_id INTEGER NOT NULL,
+            child_id INTEGER NOT NULL,
+            weight REAL NOT NULL DEFAULT 1.0,
+            PRIMARY KEY (parent_id, child_id),
+            FOREIGN KEY (parent_id) REFERENCES tree_nodes(id),
+            FOREIGN KEY (child_id) REFERENCES tree_nodes(id)
+        )",
+        [],
+    )?;
+    // The (parent_id, child_id) PK indexes child-lookups by parent (get_children).
+    // Add the reverse index for parent-lookups by child (get_parents / ancestor
+    // walks in LTM retrieval).
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_tree_edges_child ON tree_edges(child_id)",
+        [],
+    )?;
+
+    // 2. Document leaves — a tree node points at a dataId (Ledger/Pithos).
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS leaves (
+            tree_node_id INTEGER NOT NULL,
+            data_id TEXT NOT NULL,
+            provenance TEXT NOT NULL DEFAULT '{}',
+            PRIMARY KEY (tree_node_id, data_id),
+            FOREIGN KEY (tree_node_id) REFERENCES tree_nodes(id)
+        )",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_leaves_data_id ON leaves(data_id)",
+        [],
+    )?;
+
+    // 3. Vector index over node summary embeddings (sqlite-vec, LTM dimension).
+    let vec_query = format!(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS vec_ltm USING vec0(
+            node_id INTEGER PRIMARY KEY,
+            embedding float[{vector_dimension}]
+        )"
+    );
+    conn.execute(&vec_query, [])?;
+
+    // 4. FTS5 over node summaries (content table = tree_nodes).
+    conn.execute(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS fts_ltm USING fts5(
+            summary,
+            content='tree_nodes',
+            content_rowid='id'
+        )",
+        [],
+    )?;
+
+    conn.execute_batch(
+        "
+        CREATE TRIGGER IF NOT EXISTS tree_nodes_ai AFTER INSERT ON tree_nodes BEGIN
+            INSERT INTO fts_ltm(rowid, summary) VALUES (new.id, new.summary);
+        END;
+        CREATE TRIGGER IF NOT EXISTS tree_nodes_ad AFTER DELETE ON tree_nodes BEGIN
+            INSERT INTO fts_ltm(fts_ltm, rowid, summary) VALUES ('delete', old.id, old.summary);
+        END;
+        CREATE TRIGGER IF NOT EXISTS tree_nodes_au AFTER UPDATE ON tree_nodes BEGIN
+            INSERT INTO fts_ltm(fts_ltm, rowid, summary) VALUES ('delete', old.id, old.summary);
+            INSERT INTO fts_ltm(rowid, summary) VALUES (new.id, new.summary);
+        END;
+        ",
+    )?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

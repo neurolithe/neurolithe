@@ -68,6 +68,58 @@ pub trait MemoryRepository {
 
     /// Apply decay sweep across all active memory nodes
     fn sweep_decay(&self, engine: &crate::domain::decay::DecayEngine) -> Result<()>;
+
+    /// Wipe every record in this store, keeping the schema intact.
+    ///
+    /// Used by V2 reset: a soft reset wipes the STM store only (this call on
+    /// the STM connection); LTM lives in a separate connection/file and is
+    /// untouched. All tenants and CCL layers are cleared.
+    fn reset_store(&self) -> Result<()>;
+
+    /// Delete STM nodes carrying a given `dataId` in their payload (and their
+    /// vectors/edges). Used by the feeder's tombstone path to forget a document
+    /// from working memory. Best-effort: the conflict resolver may have merged a
+    /// document into a shared node, in which case nothing distinct remains here.
+    fn delete_nodes_by_data_id(&self, data_id: &str) -> Result<()>;
+
+    /// CT-scan statistics for the STM store (slice 9).
+    fn stm_stats(&self) -> Result<StmStats>;
+
+    /// List STM facts (most-relevant first) for introspection, optionally
+    /// filtered by status (`active`/`archived`).
+    fn list_node_summaries(
+        &self,
+        limit: usize,
+        status: Option<&str>,
+    ) -> Result<Vec<StmNodeSummary>>;
+
+    /// How many STM nodes carry a given `dataId` (for `trace_dataId`).
+    fn count_by_data_id(&self, data_id: &str) -> Result<i64>;
+}
+
+/// A single STM fact, flattened for the introspection CT scan.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct StmNodeSummary {
+    pub fact: String,
+    pub status: String,
+    pub relevance_score: f64,
+    pub support_count: i32,
+    pub ccl: String,
+    pub last_accessed_at: Option<String>,
+    pub data_id: Option<String>,
+}
+
+/// A snapshot of STM health for the metrics CT scan.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StmStats {
+    pub active_nodes: i64,
+    pub archived_nodes: i64,
+    /// Mean relevance over active nodes (0.0 if none).
+    pub avg_relevance: f64,
+    /// Active-node counts bucketed by relevance into 5 bins
+    /// ([0,0.2),[0.2,0.4),[0.4,0.6),[0.6,0.8),[0.8,1.0]).
+    pub decay_histogram: Vec<i64>,
+    pub db_size_bytes: i64,
 }
 
 use serde::{Deserialize, Serialize};
@@ -115,4 +167,26 @@ pub trait LlmClient {
 
     /// Compress/summarize old dialogue messages into a dense summary
     async fn compress_context(&self, messages: &str) -> Result<String>;
+}
+
+/// Outcome of fetching an artifact's text from the archive.
+///
+/// Missing is a normal, expected case — the claim-check bytes may be gone
+/// before a tombstone compacts — so the feeder skips gracefully rather than
+/// treating it as an error (ADR-0004 "empty", not "error").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FetchOutcome {
+    Found(String),
+    Missing,
+}
+
+/// Read-only access to the artifact archive (Pithos). The feeder dereferences
+/// a `pt://` pointer from a `document.completed` event to pull the page text it
+/// needs to distill. NeuroLithe never writes — Pithos stays the source of truth.
+#[async_trait::async_trait]
+pub trait ArtifactStore: Send + Sync {
+    /// Fetch the UTF-8 text artifact at a `pt://` URI. Returns
+    /// [`FetchOutcome::Missing`] for a 404/gone artifact; errors only on
+    /// transient failures (network, 5xx) the caller may retry.
+    async fn fetch_text(&self, uri: &str) -> Result<FetchOutcome>;
 }

@@ -29,10 +29,46 @@ base_url = "https://openrouter.ai/api/v1"
 # embedding_model = "text-embedding-3-small" # Note: OpenRouter doesn't do embeddings natively well yet, you may need a separate provider for embeddings if not using OpenAI/Cohere through them.
 # base_url = "https://openrouter.ai/api/v1"
 
-[database]
-# The path where SQLite stores the database. Default is neurolithe.sqlite
-path = "neurolithe.sqlite"
-# The size of the expected vector embedding. Default is 1536 (OpenAI). 
-# If using `nomic-embed-text` setup 768. If `text-embedding-004` setup 768.
-# ** Important **: Changing this on an existing database will cause errors. You must delete the database to resize the vector dimension.
+# --- V2 dual memory: two independent SQLite stores ---
+# STM = the decaying short-term working-memory engine (today's NeuroLithe).
+# LTM = the permanent long-term knowledge tree (never decays).
+# Each store locks its own vector_dimension at DB init — changing it on an
+# existing file breaks the sqlite-vec table; delete that file to resize.
+
+[stm]
+path = "neurolithe-stm.sqlite"
+# 1536 (OpenAI text-embedding-3-small). For local nomic-embed-text use 768.
 vector_dimension = 1536
+
+[ltm]
+path = "neurolithe-ltm.sqlite"
+# Defaults to 768 (local nomic-embed-text) per the offline goal; the embedding
+# provider stays configurable and is chosen at deploy time.
+vector_dimension = 768
+
+# --- Kafka: feeder + command consumer + metrics publisher (rdkafka) ---
+# Topics are created out-of-band by ../kafka/create-topics.sh (no auto-create).
+[kafka]
+brokers = "localhost:9092"
+group_id = "neurolithe"
+
+# --- Pithos archive service: the feeder fetches pt:// document text over HTTP ---
+[pithos]
+base_url = "http://192.168.4.48:8080"
+# Bearer token for read access (a secret). Prefer the env var
+# NEUROLITHE__PITHOS__TOKEN / a .env file over committing it here. Empty = no auth.
+token = ""
+
+# --- Background schedulers (wired in later slices) ---
+[sweep]
+# STM decay sweep cadence. The sweep applies one half-life day per pass, so
+# daily (86400s) keeps the forgetting curve accurate.
+interval_secs = 86400
+
+[metrics]
+# How often the CT-scan snapshot is published to memory.metrics.
+interval_secs = 60
+
+[feeder]
+# Whether the document.completed -> dual-write feeder is active.
+enabled = true

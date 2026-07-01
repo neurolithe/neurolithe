@@ -1,17 +1,30 @@
 use crate::application::app::NeurolitheApp;
+use crate::application::introspection::IntrospectionService;
 use crate::domain::models::TimeFilter;
 use crate::interfaces::mcp_types::{JsonRpcRequest, JsonRpcResponse, McpToolResult};
+use serde::Serialize;
 use serde_json::Value;
 use std::sync::Arc;
 use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+/// Render an introspection result as an MCP tool result (JSON text on success).
+fn introspect_result<T: Serialize>(result: anyhow::Result<T>) -> McpToolResult {
+    match result {
+        Ok(value) => {
+            McpToolResult::ok(serde_json::to_string(&value).unwrap_or_else(|_| "null".into()))
+        }
+        Err(e) => McpToolResult::err(format!("introspection failed: {e}")),
+    }
+}
+
 pub struct McpServer {
     app: Arc<NeurolitheApp>,
+    introspection: Arc<IntrospectionService>,
 }
 
 impl McpServer {
-    pub fn new(app: Arc<NeurolitheApp>) -> Self {
-        Self { app }
+    pub fn new(app: Arc<NeurolitheApp>, introspection: Arc<IntrospectionService>) -> Self {
+        Self { app, introspection }
     }
 
     pub async fn run_stdio(&self) -> anyhow::Result<()> {
@@ -187,6 +200,41 @@ impl McpServer {
                         Err(e) => McpToolResult::err(format!("Export failed: {}", e)),
                     }
                 }
+                // --- read-only introspection (CT scan) ---
+                "memory_stats" => introspect_result(self.introspection.memory_stats()),
+                "health" => introspect_result(self.introspection.health()),
+                "stm_list" => {
+                    let limit = tool_args
+                        .get("limit")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(20) as usize;
+                    let status = tool_args.get("status").and_then(|v| v.as_str());
+                    introspect_result(self.introspection.stm_list(limit, status))
+                }
+                "ltm_map" => {
+                    let depth =
+                        tool_args.get("depth").and_then(|v| v.as_u64()).unwrap_or(3) as usize;
+                    introspect_result(self.introspection.ltm_map(depth))
+                }
+                "inspect_node" => match tool_args.get("id").and_then(|v| v.as_i64()) {
+                    Some(node_id) => introspect_result(self.introspection.inspect_node(node_id)),
+                    None => McpToolResult::err("inspect_node requires an integer 'id'"),
+                },
+                "subtree" => match tool_args.get("node").and_then(|v| v.as_i64()) {
+                    Some(node_id) => {
+                        let depth =
+                            tool_args.get("depth").and_then(|v| v.as_u64()).unwrap_or(2) as usize;
+                        introspect_result(self.introspection.subtree(node_id, depth))
+                    }
+                    None => McpToolResult::err("subtree requires an integer 'node'"),
+                },
+                "trace_dataId" => {
+                    let data_id = tool_args
+                        .get("dataId")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    introspect_result(self.introspection.trace_data_id(data_id))
+                }
                 _ => McpToolResult::err(format!("Unknown tool: {}", tool_name)),
             };
 
@@ -274,6 +322,73 @@ impl McpServer {
                                 "tenant_id": { "type": "string", "description": "Optional tenant ID. Defaults to 'default'." }
                             },
                             "required": []
+                        }
+                    },
+                    {
+                        "name": "memory_stats",
+                        "description": "CT scan: full metrics snapshot of both memory stores (STM counts/decay histogram, LTM tree size/depth/inbox, DB sizes).",
+                        "inputSchema": { "type": "object", "properties": {}, "required": [] }
+                    },
+                    {
+                        "name": "health",
+                        "description": "Compact health summary: STM/LTM counts, orphan leaves, DB sizes, feeder lag.",
+                        "inputSchema": { "type": "object", "properties": {}, "required": [] }
+                    },
+                    {
+                        "name": "stm_list",
+                        "description": "List STM working-memory facts (most-relevant first) with score, status, and age.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "limit": { "type": "integer", "description": "Max facts to return. Defaults to 20." },
+                                "status": { "type": "string", "description": "Optional filter: 'active' or 'archived'." }
+                            },
+                            "required": []
+                        }
+                    },
+                    {
+                        "name": "ltm_map",
+                        "description": "The top N concept layers of the long-term knowledge tree (a compact table of contents).",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "depth": { "type": "integer", "description": "Number of layers from the roots. Defaults to 3." }
+                            },
+                            "required": []
+                        }
+                    },
+                    {
+                        "name": "inspect_node",
+                        "description": "Inspect one LTM node: its summary, parents, children, and document leaves (dataIds + provenance).",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "id": { "type": "integer", "description": "The LTM node id." }
+                            },
+                            "required": ["id"]
+                        }
+                    },
+                    {
+                        "name": "subtree",
+                        "description": "A branch of the LTM tree from a node down to a given depth (concepts only).",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "node": { "type": "integer", "description": "The LTM node id to start from." },
+                                "depth": { "type": "integer", "description": "Number of layers. Defaults to 2." }
+                            },
+                            "required": ["node"]
+                        }
+                    },
+                    {
+                        "name": "trace_dataId",
+                        "description": "Locate a document by dataId across the brain: its LTM leaf + ancestor branch, and how many STM facts carry it.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "dataId": { "type": "string", "description": "The document's dataId (Ledger/Pithos reference)." }
+                            },
+                            "required": ["dataId"]
                         }
                     }
                 ]
