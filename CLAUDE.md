@@ -4,18 +4,24 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-NeuroLithe is a Rust-based embedded contextual memory database for AI agents, exposed as an **MCP server** over STDIO (JSON-RPC). It combines short-term dialogue compression with a long-term hybrid graph + vector store backed by SQLite (`sqlite-vec` + FTS5).
+NeuroLithe is a Rust-based embedded contextual memory database for AI agents. It combines short-term dialogue compression (STM) with a permanent long-term knowledge tree (LTM), both backed by SQLite (`sqlite-vec` + FTS5). It runs either as a one-shot **MCP server** over STDIO (JSON-RPC) or as a long-running **daemon** that additionally feeds itself from Kafka and exposes introspection.
+
+> **Status: V2 dual-memory is BUILT.** The dual-store (STM + LTM) architecture from [`V2-DESIGN.md`](V2-DESIGN.md) is implemented end-to-end on branch `feature/v2-dual-memory` — slices 0–12 of [`IMPLEMENTATION-V2.md`](IMPLEMENTATION-V2.md) are complete (config split, decay sweep + soft reset, LTM schema/placement/retrieval, Pithos client + distillation, Kafka `document.completed` feeder, `memory.command` consumer + hard reset, metrics publisher, introspection MCP tools, daemon assembly, Dockerize/deploy), plus later `mcp` stdio mode and an OpenRouter LLM/embeddings switch. ~54 unit/integration tests. **Slice 13 (the Pharos CT-scan view) is also built** — it lives in `../pharos/admin/` (routes `/memory` + soft/hard reset), not in this crate. The one open item is **merging `feature/v2-dual-memory` into `master`** (still ~16 commits ahead). The sections below describe the built system; the "Roadmap" framing further down is retained as historical design context.
 
 ## Common Commands
 
 ```bash
 cargo build                       # debug build
 cargo build --release             # release binary
-cargo run                         # run the MCP server (reads JSON-RPC from stdin)
-cargo test                        # run all tests
+cargo run -- mcp                  # one-shot MCP server (reads JSON-RPC from stdin)
+cargo run -- daemon               # long-running daemon (MCP + Kafka feeder + command consumer + scheduler)
+cargo test                        # run all tests (~54)
 cargo test --package neurolithe <name>   # run a single test
 cargo fmt --all -- --check        # CI formatting check
 cargo clippy --all-targets -- -D warnings   # CI lint (warnings = error)
+
+# Container (slice 12)
+docker compose up --build         # build + run jarvis-neurolithe, joined to jarvis-kafka_default
 ```
 
 CI (`.github/workflows/ci.yml`) requires `cargo fmt`, `cargo clippy -D warnings`, and `cargo test` to all pass on every PR.
@@ -27,7 +33,7 @@ Runtime config is loaded by `infrastructure::config::AppConfig::load()` from (in
 2. Environment variables prefixed `NEUROLITHE__` with `__` separator (e.g. `NEUROLITHE__LLM__PROVIDER=gemini`)
 3. Hard-coded defaults
 
-LLM API keys come from environment: `OPENAI_API_KEY`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, or fallback `NEUROLITHE_API_KEY`. A `.env` file is auto-loaded via `dotenvy`.
+LLM API keys come from environment: `OPENAI_API_KEY`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, or fallback `NEUROLITHE_API_KEY`. A `.env` file is auto-loaded via `dotenvy`. **Deploy note:** the current on-mini config (commit `ffe8767`, "Option A") points the OpenAI-compatible `custom` provider at **OpenRouter for both chat and embeddings**, superseding the earlier local-gemma pointer. The design target remains local nomic (Ollama, offline); if the deployed OpenRouter embedding model's dimension differs from `ltm.vector_dimension` (default 768), the `sqlite-vec` LTM table must be rebuilt (dimension is locked at DB init).
 
 **V2 dual-store config (slice 1).** Config is split into two independent SQLite stores: `[stm]` (decaying engine, `path` = `neurolithe-stm.sqlite`, `vector_dimension` default 1536) and `[ltm]` (permanent tree, `path` = `neurolithe-ltm.sqlite`, `vector_dimension` default 768 for local nomic), plus `[kafka]`, `[pithos]`, `[sweep]`, `[metrics]`, `[feeder]`. `infrastructure::database::init_stores()` opens both (`MemoryStores`); STM runs its schema now, LTM schema lands in slice 3.
 
@@ -37,10 +43,11 @@ LLM API keys come from environment: `OPENAI_API_KEY`, `GEMINI_API_KEY`, `ANTHROP
 
 The four layers in `src/` must respect dependency direction: `interfaces → application → domain ← infrastructure`. Domain has zero networking/DB code.
 
-- **`domain/`** — Pure business logic. `models.rs` (Node/Edge/Episode/CclDefinition), `ports.rs` (`MemoryRepository` and `LlmClient` traits), `decay.rs` (exponential half-life math), `cognition/conflict_resolver.rs` (Tri-Modal adaptation: Assimilate / AccommodateModify / AccommodateCreate based on cosine-distance thresholds 0.15 / 0.35).
-- **`infrastructure/`** — Adapters implementing the ports. `repository.rs` (SQLite impl of `MemoryRepository`), `schema.rs` (DDL for `episodes`, `nodes`, `edges`, `vec_nodes` virtual table, `fts_nodes` FTS5), `llm.rs` (OpenAI/Gemini/Anthropic/Custom clients via `reqwest`), `database.rs` (rusqlite + sqlite-vec init), `config.rs`.
-- **`application/`** — Use-case orchestration that wires domain + infrastructure. `app.rs` (`NeurolitheApp` facade), `session_manager.rs` (per-session STM buffer, ~4 chars/token heuristic, compresses when over threshold), `sleep.rs` (`SleepWorker`: extract facts → resolve conflicts → store nodes/edges, plus background decay sweeps), `retrieval.rs` (hybrid search orchestration).
-- **`interfaces/`** — Delivery only. `mcp_server.rs` runs the JSON-RPC loop over STDIO; tools exposed: `push_dialogue`, `store_memory`, `query_memory`, `delete_tenant`, `export_tenant` (plus implicit `register_ccl` / `get_ccl_layers` via app).
+- **`domain/`** — Pure business logic. `models.rs` (Node/Edge/Episode/CclDefinition), `ltm.rs` (LTM tree types: `TreeNode`/`TreeEdge`/`Leaf`, kinds `spine`/`grown`/`inbox`/`leaf`), `ports.rs` (`MemoryRepository`, `LtmRepository`, `LlmClient` traits), `decay.rs` (exponential half-life math — **STM only**), `cognition/conflict_resolver.rs` (Tri-Modal adaptation: Assimilate / AccommodateModify / AccommodateCreate based on cosine-distance thresholds 0.15 / 0.35).
+- **`infrastructure/`** — Adapters implementing the ports. `repository.rs` (SQLite impl of `MemoryRepository`, STM store), `ltm_repository.rs` (SQLite impl of `LtmRepository`, the permanent tree store), `schema.rs` (STM DDL: `episodes`, `nodes`, `edges`, `vec_nodes`, `fts_nodes`; LTM DDL: `tree_nodes`, `tree_edges` multi-parent DAG, `leaves`, `vec_ltm`, `fts_ltm`), `llm.rs` (OpenAI/Gemini/Anthropic/Custom/local clients via `reqwest`), `database.rs` (opens **both** STM + LTM connections, rusqlite + sqlite-vec init), `pithos_client.rs` (HTTP client for `pt://` text, tolerates 404), `metrics_publisher.rs` (`memory.metrics` Kafka snapshot), `config.rs`.
+- **`application/`** — Use-case orchestration. `app.rs` (`NeurolitheApp` facade), `session_manager.rs` (per-session STM buffer, ~4 chars/token heuristic, compresses over threshold), `sleep.rs` (`SleepWorker`: extract facts → resolve conflicts → store, plus decay sweeps), `retrieval.rs` (STM hybrid search), `distill.rs` (LLM meaning extraction → summary/concept-hints/embedding), `ltm_placement.rs` (best-match-or-`inbox` placement + rolling summaries + tombstone re-roll), `ltm_retrieval.rs` (`ltm_map`/`ltm_expand`/`ltm_drill`/`recall_ltm`, reference-returning), `ingestion.rs` (per-document dual-write: LTM leaf + STM node via `ConflictResolver`), `reset_service.rs` (soft = STM only, hard = both + feeder offset reset), `introspection.rs` (read-only CT-scan queries), `monitoring.rs` (metrics snapshot computation), `scheduler.rs` (drives decay sweep + metrics intervals).
+- **`interfaces/`** — Delivery only. `mcp_server.rs` + `mcp_types.rs` run the JSON-RPC loop; tools exposed: `push_dialogue`, `store_memory`, `query_memory`, `delete_tenant`, `export_tenant`, plus read-only introspection `memory_stats`, `health`, `stm_list`, `ltm_map`, `inspect_node`, `subtree`, `trace_dataId` (plus implicit `register_ccl` / `get_ccl_layers` via app). `kafka_feeder.rs` consumes `document.completed` (backfill from earliest, tombstone = forget, ADR-0004 retry/`dlq.memory`/`parking.lot`). `command_consumer.rs` consumes `memory.command` (soft/hard reset, hard guarded by a confirmation token).
+- **`daemon.rs` / `main.rs`** — `main.rs` dispatches the `mcp` and `daemon` subcommands. `daemon.rs` assembles the long-running process: MCP server + Kafka feeder + command consumer + scheduler concurrently, one process owning both DB connections, with graceful shutdown.
 
 ### Key concepts to understand before editing
 
@@ -65,13 +72,11 @@ NeuroLithe has **two distinct memory regimes** that must not be conflated:
 
 > ⚠️ **Terminology trap.** The existing architecture docs (`docs/src/architecture/long-term-memory.md`) already call the current nodes/edges/vec/FTS fact store "long-term memory." That is **not** the same thing as JARVIS LTM — that store still **decays** (its nodes carry `relevance_score` and are swept). So NeuroLithe has *three* layers to keep straight: session STM buffer (in-memory), the decaying "long-term" fact store (current docs' LTM), and the *new* permanent JARVIS archive (true non-decaying LTM, not yet built). When discussing LTM, always specify which.
 
-**Open question — does anything in the current code already support the permanent archive? Answer: no.** A full code audit (`AUDIT.md`, 2026-06-20, §8 JARVIS Gap Analysis) confirms the codebase is STM/decaying-store only. There is **no** `decay_exempt`/`permanent` flag in schema, models, or sweep; the sweep selects all `WHERE status='active'` nodes with no skip path; there is no document/chunk model, no `dataId`/artifact-URI fields, no controlled tag vocabulary, and no reference-returning retrieval. So the permanent layer must be **designed and built**, not adapted from the decay path. Per the audit, adding the decay-exemption itself is *small* (a `permanent BOOLEAN DEFAULT 0` column + `AND permanent = 0` in `sweep_decay`); the document/chunk model and reference retrieval are the *large* pieces. Note also: `run_decay_sweep` is currently **never called** anywhere (no scheduler/MCP trigger), so decay is implemented but inert until wired up.
+**Historical note (resolved by V2).** The original audit (`AUDIT.md`, 2026-06-20, §8 JARVIS Gap Analysis) found the codebase was STM/decaying-store only — no permanent layer, no document model, no reference-returning retrieval, and `run_decay_sweep` never called. **V2 closed every one of those gaps:** the permanent LTM now lives in its own SQLite file (`ltm_repository.rs` + LTM schema) that the decay sweep physically cannot reach; documents flow in via the Kafka feeder + `ltm_placement` as tree leaves; `ltm_retrieval` is reference-returning (`dataId` + provenance); and the decay sweep is wired to `scheduler.rs`. Keep `AUDIT.md` for the historical gap analysis, but read it as "what V2 was built to fix," not current state.
 
-See `AUDIT.md` for the full per-feature gap analysis and complexity estimates.
+## Roadmap — JARVIS integration (V2 built; historical context below)
 
-## Roadmap — JARVIS integration (planned)
-
-> **▶ V2 architecture designed — build plan ready.** [`V2-DESIGN.md`](V2-DESIGN.md) (dual memory: STM + LTM) + [`IMPLEMENTATION-V2.md`](IMPLEMENTATION-V2.md) (sliced TDD plan). V2 splits NeuroLithe into a fast **STM** (today's decaying fact engine, own DB file) and a permanent **LTM knowledge tree** (own DB file), adds a **Kafka feeder** (`document.completed` → learns into both stores), **soft/hard reset**, and a **"brain CT scan"** introspection surface (`memory.metrics` topic + read-only MCP tools → Pharos). Start there for the build.
+> **✅ V2 BUILT.** [`V2-DESIGN.md`](V2-DESIGN.md) (dual memory: STM + LTM) + [`IMPLEMENTATION-V2.md`](IMPLEMENTATION-V2.md) (sliced TDD plan) are **implemented** on `feature/v2-dual-memory` (slices 0–12, plus later `mcp` stdio mode and an OpenRouter LLM/embeddings switch). V2 splits NeuroLithe into a fast **STM** (the decaying fact engine, own DB file) and a permanent **LTM knowledge tree** (own DB file), adds a **Kafka feeder** (`document.completed` → learns into both stores), **soft/hard reset**, and a **"brain CT scan"** introspection surface (`memory.metrics` topic + read-only MCP tools → Pharos). The remaining work is **merging `feature/v2-dual-memory` into `master`** — slice 13 (the Pharos CT-scan view: `memory.metrics` + introspection tools + reset buttons) is already built and committed in `../pharos/admin/`. The text below is retained as the design rationale.
 
 NeuroLithe is being repurposed as the **brain of JARVIS**, a private, offline-first "second brain" that ingests and indexes *all*  information (scanned documents, email, WhatsApp, Telegram, tasks, files). JARVIS uses NeuroLithe not as short-lived agent memory but as a **permanent personal knowledge archive** — giving it a second nature alongside the existing decaying working memory.
 

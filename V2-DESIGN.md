@@ -93,7 +93,7 @@ Goal: see inside the brain to diagnose and improve it. Two tiers, both honoring 
   - `trace_dataId(dataId)` — where a given document lives in the brain (LTM leaf/branch + STM presence).
   - `health` — consumer lag, last error, DB sizes, sweep status.
 
-**Pharos** renders these as a Memory / CT-scan view (separate Pharos work).
+**Pharos** renders these as a Memory / CT-scan view — **built** in `../pharos/admin/` (`/memory`, with soft/hard reset).
 
 ## 7. Communication summary (bus + doors)
 

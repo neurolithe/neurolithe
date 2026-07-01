@@ -2,7 +2,7 @@
 
 > Step-by-step plan to build the dual-memory (STM + LTM) NeuroLithe. Architecture: [`V2-DESIGN.md`](V2-DESIGN.md). Build pattern, non-negotiable: **small slice → unit test → review (security → performance → style) → next slice.** Each slice compiles and its tests pass before the next starts.
 >
-> Stack: **Rust + SQLite** (two DB files), **sqlite-vec** + **FTS5**, **rdkafka** (feeder + command consumer + metrics producer), local LLM + embeddings (Ollama, offline), Pithos HTTP client, Docker Compose on the Mac mini joined to `jarvis-kafka_default`. Error handling per **ADR-0004**.
+> Stack: **Rust + SQLite** (two DB files), **sqlite-vec** + **FTS5**, **rdkafka** (feeder + command consumer + metrics producer), local LLM + embeddings (Ollama, offline) — *deployed config currently uses OpenRouter for both (commit `ffe8767`)*, Pithos HTTP client, Docker Compose on the Mac mini joined to `jarvis-kafka_default`. Error handling per **ADR-0004**.
 
 ## Guardrails
 - **STM keeps decay; LTM must never decay.** Enforced by separate DB files — never share a decay path.
@@ -64,9 +64,9 @@ Add tools: `memory_stats`, `stm_list(limit,status)`, `ltm_map(depth)`, `inspect_
 Multi-stage Dockerfile; `docker-compose.yml` joining `jarvis-kafka_default`, both SQLite files on a named volume, env wired (Kafka, Pithos URL, local-LLM endpoint), README run/verify. Deploy `jarvis-neurolithe` on the mini. Smoke: scan a real doc → appears in the brain (CT scan shows the leaf + STM node); soft then hard reset behave.
 **Done when:** container runs, backfills existing `document.completed`, serves recall + introspection, resets work.
 
-## Slice 13 — Pharos: Memory / CT-scan view *(separate, in `pharos/admin/`)*
-Consume `memory.metrics` for KPIs + health; call the introspection tools for tree snapshot, node inspector, decay histogram, `dataId` trace; **reset buttons** publish `memory.command` (with a confirmation dialog). Bus + door only — **no DB peeking.**
-**Done when:** the operator can watch the brain (sizes, lag, decay), browse the tree, trace a document, and trigger soft/hard reset from the console.
+## Slice 13 — Pharos: Memory / CT-scan view *(separate, in `pharos/admin/`)* ✅ BUILT
+Built in `../pharos/admin/` (routes `/memory` + `/memory/reset/{soft,hard}`). Consume `memory.metrics` for KPIs + health; call the introspection tools for tree snapshot, node inspector, decay histogram, `dataId` trace; **reset buttons** publish `memory.command` (with a confirmation dialog). Bus + door only — **no DB peeking.**
+**Done when:** the operator can watch the brain (sizes, lag, decay), browse the tree, trace a document, and trigger soft/hard reset from the console. ✅ — shipped.
 
 ---
 
