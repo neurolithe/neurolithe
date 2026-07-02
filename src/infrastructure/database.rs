@@ -83,6 +83,10 @@ mod tests {
                 model: "m".into(),
                 embedding_model: "e".into(),
                 base_url: None,
+                embedding_provider: None,
+                embedding_base_url: None,
+                embedding_project: None,
+                embedding_location: None,
             },
             stm: StoreConfig {
                 vector_dimension: 1536,

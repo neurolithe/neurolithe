@@ -20,9 +20,10 @@ services:
     image: neurolithe:latest
     container_name: jarvis-neurolithe
     restart: unless-stopped
-    # Optional .env (git-ignored) for secrets/overrides: a cloud LLM API key
-    # (OPENAI_API_KEY / GEMINI_API_KEY / NEUROLITHE_API_KEY) and the hard-reset
-    # guard token (NEUROLITHE_RESET_TOKEN). Local-only setups need neither.
+    # Optional .env (git-ignored) for secrets/overrides: the Claude chat key
+    # (ANTHROPIC_API_KEY), the Pithos read token (NEUROLITHE__PITHOS__TOKEN), and
+    # the hard-reset guard token (NEUROLITHE_RESET_TOKEN). Vertex embeddings
+    # authenticate via the mounted service-account key (below), not an API key.
     env_file:
       - path: .env
         required: false
@@ -38,21 +39,26 @@ services:
       NEUROLITHE__PITHOS__BASE_URL: http://192.168.4.48:8080
 
       # --- embeddings / LLM (CONFIGURABLE) ---
-      # Current = OpenRouter (cloud) for BOTH summarization and embeddings. The
-      # feeder writes ONE embedding to both stores, so STM and LTM dimensions
-      # MUST match the embedding model (text-embedding-3-small = 1536). The API
-      # key (NEUROLITHE_API_KEY=sk-or-...) lives in .env.
+      # Chat/reasoning = Claude API (Sonnet 5); embeddings = Google Vertex AI
+      # (text-embedding-004, 768-dim), reusing Cadmus's service-account access.
+      # The feeder writes ONE embedding to both stores, so STM and LTM dimensions
+      # MUST match the embedding model (text-embedding-004 = 768).
       #
-      # NOTE (privacy): this sends document text to OpenRouter — a CLOUD egress,
-      # against JARVIS's offline-first default, chosen consciously. For a fully
-      # offline setup, point BASE_URL at a local Ollama (nomic-embed-text, dims
-      # 768) instead.
-      NEUROLITHE__LLM__PROVIDER: custom
-      NEUROLITHE__LLM__MODEL: openai/gpt-4o-mini
-      NEUROLITHE__LLM__EMBEDDING_MODEL: openai/text-embedding-3-small
-      NEUROLITHE__LLM__BASE_URL: https://openrouter.ai/api/v1
-      NEUROLITHE__STM__VECTOR_DIMENSION: 1536
-      NEUROLITHE__LTM__VECTOR_DIMENSION: 1536
+      # NOTE (privacy): this sends document text to Anthropic + Google — a CLOUD
+      # egress, against JARVIS's offline-first default, chosen consciously. For a
+      # fully offline setup, point both halves at a local Ollama instead
+      # (provider=custom, base_url=http://host.docker.internal:11434/v1).
+      NEUROLITHE__LLM__PROVIDER: anthropic
+      NEUROLITHE__LLM__MODEL: claude-sonnet-5
+      NEUROLITHE__LLM__EMBEDDING_PROVIDER: vertex
+      NEUROLITHE__LLM__EMBEDDING_MODEL: text-embedding-004
+      NEUROLITHE__LLM__EMBEDDING_PROJECT: jarvis-cadmus
+      NEUROLITHE__LLM__EMBEDDING_LOCATION: us-central1
+      # In-container path of the mounted service-account key (see volumes below);
+      # overrides any host path inherited from .env.
+      GOOGLE_APPLICATION_CREDENTIALS: /etc/neurolithe/key.json
+      NEUROLITHE__STM__VECTOR_DIMENSION: 768
+      NEUROLITHE__LTM__VECTOR_DIMENSION: 768
 
       # --- behavior ---
       NEUROLITHE__FEEDER__ENABLED: "true"
@@ -66,6 +72,8 @@ services:
       - "host.docker.internal:host-gateway"
     volumes:
       - neurolithe-data:/data
+      # Vertex service-account key (read-only), same key/path Cadmus mounts.
+      - /Users/mymini/.config/jarvis/cadmus-vertex-key.json:/etc/neurolithe/key.json:ro
 
 # Join the broker's existing Compose network instead of creating a new one.
 networks:
