@@ -44,6 +44,12 @@ impl NeurolitheApp {
         self.sleep_worker.run_decay_sweep().await
     }
 
+    /// Drop `memory.command` idempotency rows older than `older_than_days`.
+    /// Piggybacks on the decay sweep cadence; returns how many were removed.
+    pub fn sweep_processed_commands(&self, older_than_days: i64) -> Result<usize> {
+        self.memory_repo.sweep_processed_commands(older_than_days)
+    }
+
     /// Soft reset — wipe the STM store only. The permanent LTM store lives in a
     /// separate connection/file and is untouched. Destructive.
     pub fn soft_reset(&self) -> Result<()> {

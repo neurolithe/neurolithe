@@ -47,11 +47,18 @@ impl SweepTask {
     }
 }
 
+/// How long a processed `commandId` is retained before the sweep drops it —
+/// only needs to outlast Kafka's redelivery window, so two weeks is ample.
+const COMMAND_ID_RETENTION_DAYS: i64 = 14;
+
 #[async_trait(?Send)]
 impl PeriodicTask for SweepTask {
     async fn run_once(&self) {
         if let Err(e) = self.app.run_decay_sweep().await {
             eprintln!("[neurolithe] decay sweep failed: {e}");
+        }
+        if let Err(e) = self.app.sweep_processed_commands(COMMAND_ID_RETENTION_DAYS) {
+            eprintln!("[neurolithe] processed-command sweep failed: {e}");
         }
     }
 }

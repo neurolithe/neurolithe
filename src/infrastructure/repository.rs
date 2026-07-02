@@ -576,6 +576,31 @@ impl MemoryRepository for SqliteMemoryRepository {
         )?)
     }
 
+    fn is_command_processed(&self, command_id: &str) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM processed_commands WHERE command_id = ?1)",
+            params![command_id],
+            |r| r.get(0),
+        )?)
+    }
+
+    fn mark_command_processed(&self, command_id: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO processed_commands (command_id) VALUES (?1)",
+            params![command_id],
+        )?;
+        Ok(())
+    }
+
+    fn sweep_processed_commands(&self, older_than_days: i64) -> Result<usize> {
+        let cutoff = format!("-{older_than_days} days");
+        let removed = self.conn.execute(
+            "DELETE FROM processed_commands WHERE processed_at < datetime('now', ?1)",
+            params![cutoff],
+        )?;
+        Ok(removed)
+    }
+
     fn delete_nodes_by_data_id(&self, data_id: &str) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
         // Match nodes whose payload carries this dataId. Edges + vectors go

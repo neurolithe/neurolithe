@@ -13,12 +13,59 @@ use serde::Deserialize;
 use std::sync::Arc;
 
 /// A command on the `memory.command` topic. Internally tagged on `command`:
-/// `{"command":"reset_soft"}` / `{"command":"reset_hard","confirm":"<token>"}`.
+/// `{"command":"reset_soft"}`, `{"command":"reset_hard","confirm":"<token>"}`,
+/// `{"command":"remember","scope":"stm",…}`, `{"command":"forget","dataId":…}`.
+///
+/// The two reset variants are the historical shape — Pharos already publishes
+/// them — and MUST keep parsing unchanged as `remember`/`forget` are added.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum MemoryCommand {
     ResetSoft,
     ResetHard { confirm: String },
+    Remember(RememberCommand),
+    Forget(ForgetCommand),
+}
+
+/// Which store a `remember` targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WriteScope {
+    Stm,
+    Ltm,
+}
+
+/// A `remember` write. `scope=stm` uses `fact` (+ optional `ccl`/`tenant`);
+/// `scope=ltm` uses `text` (+ optional `tags`). Fields are optional at the parse
+/// layer and validated per-scope when applied, so one envelope covers both.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RememberCommand {
+    pub command_id: String,
+    pub scope: WriteScope,
+    /// STM fact text (`scope=stm`).
+    #[serde(default)]
+    pub fact: Option<String>,
+    /// LTM note text (`scope=ltm`).
+    #[serde(default)]
+    pub text: Option<String>,
+    /// Cognitive-context layer for an STM fact (defaults to `reality`).
+    #[serde(default)]
+    pub ccl: Option<String>,
+    /// Tags for an LTM note (advisory; not vocabulary-enforced in v1).
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Tenant override (defaults to `jarvis`).
+    #[serde(default)]
+    pub tenant: Option<String>,
+}
+
+/// A `forget` write — tombstones a `dataId` across both stores.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForgetCommand {
+    pub command_id: String,
+    pub data_id: String,
 }
 
 impl MemoryCommand {
@@ -77,6 +124,11 @@ impl ResetService {
             MemoryCommand::ResetHard { confirm } => {
                 self.hard_reset(confirm)?;
                 Ok(ResetKind::Hard)
+            }
+            // Writes are handled by WriteService, not here; the consumer routes
+            // by variant, so this arm is a defensive guard only.
+            MemoryCommand::Remember(_) | MemoryCommand::Forget(_) => {
+                bail!("reset service received a non-reset command")
             }
         }
     }

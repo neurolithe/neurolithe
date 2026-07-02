@@ -100,6 +100,18 @@ pub fn init_schema(conn: &Connection, vector_dimension: usize) -> rusqlite::Resu
         ",
     )?;
 
+    // 6. Idempotency ledger for `memory.command` writes. A `commandId` is
+    // recorded after a remember/forget succeeds; a duplicate delivery is
+    // skipped. Old rows are swept periodically (the ids only guard against
+    // at-least-once redelivery, which is bounded in time).
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS processed_commands (
+            command_id TEXT PRIMARY KEY,
+            processed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )",
+        [],
+    )?;
+
     Ok(())
 }
 

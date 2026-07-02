@@ -12,6 +12,7 @@ use crate::application::introspection::IntrospectionService;
 use crate::application::monitoring::{FeederStats, MonitoringService};
 use crate::application::reset_service::ResetService;
 use crate::application::scheduler::{PeriodicTask, SweepTask, run_periodic};
+use crate::application::write_service::WriteService;
 use crate::domain::ltm::LtmRepository;
 use crate::domain::ports::{ArtifactStore, LlmClient, MemoryRepository};
 use crate::infrastructure::config::{AppConfig, LlmProvider};
@@ -126,6 +127,12 @@ pub async fn run(config: AppConfig) -> Result<()> {
         ltm_repo.clone(),
         reset_token,
     ));
+    let write = Arc::new(WriteService::new(
+        stm_repo.clone(),
+        ltm_repo.clone(),
+        ingestion.clone(),
+        llm.clone(),
+    ));
     let feeder_stats = Arc::new(FeederStats::default());
 
     // --- feeder (optional) + rewind handle for hard reset ---
@@ -149,6 +156,7 @@ pub async fn run(config: AppConfig) -> Result<()> {
         &config.kafka.brokers,
         &format!("{}-cmd", config.kafka.group_id),
         reset,
+        write,
         rewind,
     )?);
 

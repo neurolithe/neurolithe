@@ -9,6 +9,7 @@
 //! smoke test — the reset logic itself is unit-tested in `reset_service`.
 
 use crate::application::reset_service::{MemoryCommand, ResetKind, ResetService};
+use crate::application::write_service::WriteService;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use rdkafka::config::ClientConfig;
@@ -70,6 +71,7 @@ impl FeederRewind for NoopRewind {
 pub struct CommandConsumer {
     consumer: StreamConsumer,
     reset: Arc<ResetService>,
+    write: Arc<WriteService>,
     rewind: Arc<dyn FeederRewind>,
     topic: String,
 }
@@ -79,6 +81,7 @@ impl CommandConsumer {
         brokers: &str,
         group_id: &str,
         reset: Arc<ResetService>,
+        write: Arc<WriteService>,
         rewind: Arc<dyn FeederRewind>,
     ) -> Result<Self> {
         let consumer: StreamConsumer = ClientConfig::new()
@@ -92,6 +95,7 @@ impl CommandConsumer {
         Ok(Self {
             consumer,
             reset,
+            write,
             rewind,
             topic: "memory.command".into(),
         })
@@ -128,16 +132,29 @@ impl CommandConsumer {
             }
         };
 
-        match self.reset.apply(&command) {
-            // Hard reset wiped both stores — relearn from the bus.
-            Ok(ResetKind::Hard) => {
-                if let Err(e) = self.rewind.rewind_to_earliest().await {
-                    eprintln!("[neurolithe] feeder rewind after hard reset failed: {e}");
+        // Route by variant: resets go to ResetService (rewinding the feeder on a
+        // hard reset), writes go to the idempotent WriteService.
+        match &command {
+            MemoryCommand::ResetSoft | MemoryCommand::ResetHard { .. } => {
+                match self.reset.apply(&command) {
+                    // Hard reset wiped both stores — relearn from the bus.
+                    Ok(ResetKind::Hard) => {
+                        if let Err(e) = self.rewind.rewind_to_earliest().await {
+                            eprintln!("[neurolithe] feeder rewind after hard reset failed: {e}");
+                        }
+                    }
+                    Ok(ResetKind::Soft) => {}
+                    // e.g. confirmation token mismatch — refuse and keep running.
+                    Err(e) => eprintln!("[neurolithe] reset refused: {e}"),
                 }
             }
-            Ok(ResetKind::Soft) => {}
-            // e.g. confirmation token mismatch — refuse and keep running.
-            Err(e) => eprintln!("[neurolithe] reset refused: {e}"),
+            MemoryCommand::Remember(_) | MemoryCommand::Forget(_) => {
+                // A write failure is logged, not retried in-loop; redelivery
+                // re-applies (the commandId isn't marked until success).
+                if let Err(e) = self.write.handle(&command).await {
+                    eprintln!("[neurolithe] memory write failed: {e}");
+                }
+            }
         }
     }
 }
