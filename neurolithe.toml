@@ -93,3 +93,9 @@ interval_secs = 60
 [feeder]
 # Whether the document.completed -> dual-write feeder is active.
 enabled = true
+
+[bus_query]
+# Whether the memory.query -> memory.result request/reply door is active — the
+# bus API that lets Metis read STM + LTM (and write via memory.command). Turn
+# off to run ingestion/reset without serving reads. See BUS-MEMORY-EVENTS.md.
+enabled = true
