@@ -1,11 +1,29 @@
 [llm]
-# Provider can be "openai", "gemini", "anthropic", or "custom"
-provider = "custom"
-# The main model used for pulling facts out of short-term memory dialogue
-model = "openai/gpt-4o-mini"
-# The model used for semantic search vector embeddings
-embedding_model = "openai/text-embedding-3-small"
-base_url = "https://openrouter.ai/api/v1"
+# Chat/reasoning runs on the Claude API (Sonnet 5); embeddings run on Google.
+# Claude has NO embeddings endpoint, so `embedding_provider` MUST differ.
+# Providers: "openai", "gemini", "anthropic", or "custom".
+provider = "anthropic"
+# Main model for pulling facts out of dialogue (fact extraction / compression).
+model = "claude-sonnet-5"
+# --- Embeddings (Google Vertex AI; text-embedding-004 = 768-dim) ---
+# Reuses Cadmus's Vertex access: service-account auth via
+# GOOGLE_APPLICATION_CREDENTIALS (no API key). text-embedding-004 outputs
+# 768-dim vectors, so both stores below are set to 768. Chat key comes from
+# ANTHROPIC_API_KEY.
+embedding_provider = "vertex"
+embedding_model = "text-embedding-004"
+embedding_project = "jarvis-cadmus"
+# text-embedding-004 is served regionally, not on the `global` endpoint that
+# Cadmus's OCR uses — us-central1 is a safe region for it.
+embedding_location = "us-central1"
+
+# To go fully offline (local LLM), point BOTH halves at Ollama instead, e.g.:
+# provider = "custom"
+# model = "llama3.1"
+# base_url = "http://localhost:11434/v1"
+# embedding_provider = "custom"
+# embedding_model = "nomic-embed-text"        # 768-dim
+# embedding_base_url = "http://localhost:11434/v1"
 
 # Example for Google Gemini:
 # provider = "gemini"
@@ -37,8 +55,11 @@ base_url = "https://openrouter.ai/api/v1"
 
 [stm]
 path = "neurolithe-stm.sqlite"
-# 1536 (OpenAI text-embedding-3-small). For local nomic-embed-text use 768.
-vector_dimension = 1536
+# 768 = Google text-embedding-004 (also local nomic-embed-text). The feeder
+# writes one embedding to BOTH stores, so STM and LTM must share this dimension.
+# NOTE: changing this from a prior value requires deleting neurolithe-stm.sqlite
+# so the sqlite-vec table is rebuilt at the new dimension (the feeder backfills).
+vector_dimension = 768
 
 [ltm]
 path = "neurolithe-ltm.sqlite"

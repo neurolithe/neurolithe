@@ -25,6 +25,36 @@ pub struct LlmConfig {
     pub model: String,
     pub embedding_model: String,
     pub base_url: Option<String>,
+    /// Provider used for embeddings, independent of the chat `provider`.
+    ///
+    /// Claude has no embeddings endpoint, so when `provider` is `anthropic`
+    /// this MUST point at a provider that does — e.g. `gemini` for Google
+    /// `text-embedding-004`, or `custom` for a local Ollama/OpenAI-compatible
+    /// endpoint. When unset it falls back to `provider` (single-provider mode,
+    /// the historical behaviour).
+    #[serde(default)]
+    pub embedding_provider: Option<LlmProvider>,
+    /// Base URL for the embedding provider (only used by `openai`/`custom`).
+    /// Falls back to `base_url` when unset.
+    #[serde(default)]
+    pub embedding_base_url: Option<String>,
+    /// GCP project for the `vertex` embedding provider (Vertex AI). Auth comes
+    /// from the service-account key at `GOOGLE_APPLICATION_CREDENTIALS`.
+    #[serde(default)]
+    pub embedding_project: Option<String>,
+    /// Vertex AI region for the `vertex` embedding provider, e.g. `us-central1`
+    /// (drives data residency). `global` uses the unprefixed host. Defaults to
+    /// `us-central1` when unset.
+    #[serde(default)]
+    pub embedding_location: Option<String>,
+}
+
+impl LlmConfig {
+    /// The provider actually used for embeddings: `embedding_provider` when set,
+    /// otherwise the chat `provider`.
+    pub fn effective_embedding_provider(&self) -> &LlmProvider {
+        self.embedding_provider.as_ref().unwrap_or(&self.provider)
+    }
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq)]
@@ -34,6 +64,9 @@ pub enum LlmProvider {
     Gemini,
     Anthropic,
     Custom,
+    /// Google Vertex AI (service-account auth via `GOOGLE_APPLICATION_CREDENTIALS`).
+    /// Used for embeddings, sharing Cadmus's Gemini/Vertex access.
+    Vertex,
 }
 
 /// Configuration for one of the two SQLite memory stores (STM or LTM).

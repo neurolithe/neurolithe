@@ -64,6 +64,9 @@ fn resolve_api_key(provider: &LlmProvider) -> String {
         LlmProvider::Openai | LlmProvider::Custom => "OPENAI_API_KEY",
         LlmProvider::Gemini => "GEMINI_API_KEY",
         LlmProvider::Anthropic => "ANTHROPIC_API_KEY",
+        // Vertex authenticates via gcp_auth (GOOGLE_APPLICATION_CREDENTIALS), not
+        // an API key; the returned value is unused by VertexClient.
+        LlmProvider::Vertex => return "vertex_uses_gcp_auth".to_string(),
     };
     std::env::var(primary)
         .or_else(|_| std::env::var("NEUROLITHE_API_KEY"))
@@ -90,8 +93,13 @@ pub async fn run(config: AppConfig) -> Result<()> {
     ltm_repo.seed_spine()?;
 
     // --- external adapters ---
-    let llm: Arc<dyn LlmClient> =
-        create_llm_client(&config.llm, resolve_api_key(&config.llm.provider));
+    // Chat and embeddings may use different providers (Claude has no embeddings
+    // endpoint), so resolve a key for each.
+    let llm: Arc<dyn LlmClient> = create_llm_client(
+        &config.llm,
+        resolve_api_key(&config.llm.provider),
+        resolve_api_key(config.llm.effective_embedding_provider()),
+    );
     let pithos: Arc<dyn ArtifactStore> = Arc::new(PithosClient::new(
         &config.pithos.base_url,
         &config.pithos.token,
@@ -205,8 +213,11 @@ pub async fn run_mcp(config: AppConfig) -> Result<()> {
     let ltm_repo: Arc<dyn LtmRepository> = Arc::new(SqliteLtmRepository::new(ltm));
     ltm_repo.seed_spine()?;
 
-    let llm: Arc<dyn LlmClient> =
-        create_llm_client(&config.llm, resolve_api_key(&config.llm.provider));
+    let llm: Arc<dyn LlmClient> = create_llm_client(
+        &config.llm,
+        resolve_api_key(&config.llm.provider),
+        resolve_api_key(config.llm.effective_embedding_provider()),
+    );
     let app = Arc::new(NeurolitheApp::new(stm_repo.clone(), llm, 7.0));
     let introspection = Arc::new(IntrospectionService::new(stm_repo, ltm_repo));
 

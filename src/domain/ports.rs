@@ -150,8 +150,11 @@ pub struct ExtractedRelationship {
     pub valid_until: Option<String>,
 }
 
+// `Send + Sync` so `Arc<dyn LlmClient>` can be shared across tasks and composed
+// (e.g. the chat/embedding split in `SplitLlmClient`). Every implementor —
+// reqwest-based provider clients and test stubs — is genuinely thread-safe.
 #[async_trait::async_trait]
-pub trait LlmClient {
+pub trait LlmClient: Send + Sync {
     /// Extract factual statements from given raw dialogue
     async fn extract_facts(
         &self,

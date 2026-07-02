@@ -15,6 +15,9 @@ anyhow = "1.0.102"
 async-trait = "0.1.89"
 config = "0.15.19"
 dotenvy = "0.15.7"
+# Vertex AI service-account auth for embeddings (mints short-lived access
+# tokens from GOOGLE_APPLICATION_CREDENTIALS). Same crate + version as Cadmus.
+gcp_auth = "0.12"
 libsqlite3-sys = "0.36.0"
 # Kafka feeder + command consumer + metrics producer. Default features build a
 # vendored librdkafka from source (matches Cadmus/Ledger/Chronos; no system lib).
