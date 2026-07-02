@@ -65,8 +65,8 @@ pub fn init_stores(config: &AppConfig) -> rusqlite::Result<MemoryStores> {
 mod tests {
     use super::*;
     use crate::infrastructure::config::{
-        FeederConfig, KafkaConfig, LlmConfig, LlmProvider, MetricsConfig, PithosConfig,
-        StoreConfig, SweepConfig,
+        BusQueryConfig, FeederConfig, KafkaConfig, LlmConfig, LlmProvider, MetricsConfig,
+        PithosConfig, StoreConfig, SweepConfig,
     };
 
     #[test]
@@ -109,6 +109,7 @@ mod tests {
             },
             metrics: MetricsConfig { interval_secs: 60 },
             feeder: FeederConfig { enabled: true },
+            bus_query: BusQueryConfig { enabled: true },
         }
     }
 

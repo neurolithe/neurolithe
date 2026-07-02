@@ -14,6 +14,7 @@
 //! [`RecallResult`]) into wire entries without leaking STM internal ids.
 
 use crate::application::ltm_retrieval::RecallResult;
+use crate::application::query_service::QueryScope;
 use crate::domain::ltm::Provenance;
 use crate::domain::models::{MemoryResult, TimeFilter};
 use serde::{Deserialize, Serialize};
@@ -30,20 +31,6 @@ fn default_tenant() -> String {
 
 fn default_k() -> usize {
     DEFAULT_K
-}
-
-/// What kind of read a `memory.query` asks for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum QueryScope {
-    /// Recent, decaying facts only (`RetrievalService::query`).
-    Stm,
-    /// Permanent knowledge tree only (`LtmRetrieval::recall`).
-    Ltm,
-    /// Both stores, independently.
-    Both,
-    /// The headline: STM recall seeds the LTM search (design §5).
-    LtmViaStm,
 }
 
 /// Inbound `memory.query` envelope. Lenient: unknown fields are ignored and
@@ -92,7 +79,7 @@ pub fn parse_query(bytes: &[u8]) -> ParseOutcome {
         Err(e) => {
             return ParseOutcome::Unroutable {
                 reason: format!("not valid JSON: {e}"),
-            }
+            };
         }
     };
 
@@ -101,7 +88,7 @@ pub fn parse_query(bytes: &[u8]) -> ParseOutcome {
         _ => {
             return ParseOutcome::Unroutable {
                 reason: "missing or non-string correlationId".to_string(),
-            }
+            };
         }
     };
 
@@ -349,7 +336,10 @@ mod tests {
         };
         let entry = StmEntry::from_memory_result(&m);
         let v = serde_json::to_value(&entry).unwrap();
-        assert_eq!(v["connections"][0], json!({"relation":"at","entity":"Kerrisdale"}));
+        assert_eq!(
+            v["connections"][0],
+            json!({"relation":"at","entity":"Kerrisdale"})
+        );
         assert!(v["connections"][0].get("ccl").is_none());
     }
 

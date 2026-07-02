@@ -17,6 +17,8 @@ pub struct AppConfig {
     pub sweep: SweepConfig,
     pub metrics: MetricsConfig,
     pub feeder: FeederConfig,
+    #[serde(default)]
+    pub bus_query: BusQueryConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -122,6 +124,20 @@ pub struct FeederConfig {
     pub enabled: bool,
 }
 
+/// Whether the `memory.query` → `memory.result` request/reply loop is active —
+/// the bus door that lets Metis read STM + LTM (design §§3–6). Independent of
+/// the feeder so reads can be served without ingestion, and vice versa.
+#[derive(Debug, Deserialize, Clone)]
+pub struct BusQueryConfig {
+    pub enabled: bool,
+}
+
+impl Default for BusQueryConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
 impl AppConfig {
     pub fn load() -> anyhow::Result<Self> {
         // Load .env file if it exists
@@ -154,7 +170,8 @@ impl AppConfig {
             // Daily decay sweep (sweep applies one half-life day per pass).
             .set_default("sweep.interval_secs", 86_400_i64)?
             .set_default("metrics.interval_secs", 60_i64)?
-            .set_default("feeder.enabled", true)?;
+            .set_default("feeder.enabled", true)?
+            .set_default("bus_query.enabled", true)?;
 
         // If neurolithe.toml exists, load it
         if include_file && std::path::Path::new("neurolithe.toml").exists() {
@@ -198,6 +215,7 @@ mod tests {
         assert_eq!(cfg.sweep.interval_secs, 86_400);
         assert_eq!(cfg.metrics.interval_secs, 60);
         assert!(cfg.feeder.enabled);
+        assert!(cfg.bus_query.enabled);
         // STM and LTM dimensions are independent — changing one never implies
         // the other.
         assert_ne!(cfg.stm.vector_dimension, cfg.ltm.vector_dimension);

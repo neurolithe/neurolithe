@@ -5,6 +5,7 @@ pub mod introspection;
 pub mod ltm_placement;
 pub mod ltm_retrieval;
 pub mod monitoring;
+pub mod query_service;
 pub mod reset_service;
 pub mod retrieval;
 pub mod scheduler;
