@@ -63,6 +63,21 @@ pub struct RememberCommand {
     /// Tenant override (defaults to `jarvis`).
     #[serde(default)]
     pub tenant: Option<String>,
+    /// Documents/entities this working turn is *about* (STM-GRAPH). Each becomes
+    /// a reused subject node with an `about` edge from the turn — the relation
+    /// that connects a session's turns and marks the focus. Empty for ordinary
+    /// facts.
+    #[serde(default)]
+    pub subjects: Vec<SubjectRef>,
+}
+
+/// A subject a working turn refers to: a `dataId` plus a short human label.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubjectRef {
+    pub data_id: String,
+    #[serde(default)]
+    pub label: String,
 }
 
 /// A `forget` write — tombstones a `dataId` across both stores.

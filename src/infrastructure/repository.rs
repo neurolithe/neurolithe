@@ -2,7 +2,7 @@ use crate::domain::models::{Episode, MemoryNode, MemoryResult, TenantId};
 use crate::domain::ports::MemoryRepository;
 use crate::infrastructure::database::db_size_bytes;
 use anyhow::Result;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
 pub struct SqliteMemoryRepository {
     conn: Connection,
@@ -594,6 +594,27 @@ impl MemoryRepository for SqliteMemoryRepository {
             decay_histogram,
             db_size_bytes: db_size_bytes(&self.conn)?,
         })
+    }
+
+    fn find_working_subject(
+        &self,
+        tenant_id: &TenantId,
+        context_key: &str,
+        data_id: &str,
+    ) -> Result<Option<i64>> {
+        let id = self
+            .conn
+            .query_row(
+                "SELECT id FROM nodes
+                 WHERE tenant_id = ?1 AND context_key = ?2 AND ccl = 'working' AND status = 'active'
+                   AND json_extract(payload, '$.kind') = 'subject'
+                   AND json_extract(payload, '$.dataId') = ?3
+                 ORDER BY id DESC LIMIT 1",
+                params![tenant_id.0, context_key, data_id],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()?;
+        Ok(id)
     }
 
     fn list_node_summaries(

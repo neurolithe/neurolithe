@@ -16,7 +16,7 @@ use crate::application::reset_service::{
     ForgetCommand, MemoryCommand, RememberCommand, WriteScope,
 };
 use crate::domain::ltm::{LtmRepository, Provenance};
-use crate::domain::models::{MemoryNode, TenantId};
+use crate::domain::models::{Edge, MemoryNode, TenantId};
 use crate::domain::ports::{LlmClient, MemoryRepository};
 use anyhow::{Result, bail};
 use std::sync::Arc;
@@ -52,6 +52,8 @@ pub struct WriteService {
     ltm: Arc<dyn LtmRepository>,
     ingestion: Arc<IngestionService>,
     llm: Arc<dyn LlmClient>,
+    /// STM embedding dimension, for zero-vector graph-anchor (subject) nodes.
+    stm_vector_dim: usize,
 }
 
 impl WriteService {
@@ -60,12 +62,14 @@ impl WriteService {
         ltm: Arc<dyn LtmRepository>,
         ingestion: Arc<IngestionService>,
         llm: Arc<dyn LlmClient>,
+        stm_vector_dim: usize,
     ) -> Self {
         Self {
             stm,
             ltm,
             ingestion,
             llm,
+            stm_vector_dim,
         }
     }
 
@@ -106,13 +110,15 @@ impl WriteService {
         };
         let tenant = cmd.tenant.as_deref().unwrap_or(DEFAULT_TENANT);
         let ccl = cmd.ccl.as_deref().unwrap_or(DEFAULT_CCL);
+        let tenant_id = TenantId(tenant.to_string());
 
+        // The turn node — the action/task. `kind:"turn"` marks it in the graph.
         let embedding = self.llm.embed_text(fact).await?;
-        let node = MemoryNode {
+        let turn = MemoryNode {
             id: None,
-            tenant_id: TenantId(tenant.to_string()),
+            tenant_id: tenant_id.clone(),
             source_episode_id: None,
-            payload: serde_json::json!({ "fact": fact, "tags": cmd.tags }),
+            payload: serde_json::json!({ "fact": fact, "kind": "turn", "tags": cmd.tags }),
             status: "active".into(),
             ccl: ccl.to_string(),
             is_explicit: true,
@@ -120,8 +126,77 @@ impl WriteService {
             relevance_score: 1.0,
             context_key: cmd.context_key.clone(),
         };
-        self.stm.store_node(&node, &embedding)?;
+        let turn_id = self.stm.store_node(&turn, &embedding)?;
+
+        // STM-GRAPH: link this turn to the documents/entities it is about. Each
+        // subject is a reused node per (thread, dataId) so turns about the same
+        // thing connect through it; an `about` edge is the relation. Only
+        // meaningful when the turn is thread-scoped (a working note).
+        if let Some(context_key) = cmd.context_key.as_deref() {
+            for subject in &cmd.subjects {
+                if subject.data_id.is_empty() {
+                    continue;
+                }
+                let subject_id = self
+                    .find_or_create_subject(&tenant_id, context_key, ccl, subject)
+                    .await?;
+                self.stm.store_edge(&Edge {
+                    source_id: turn_id,
+                    target_id: subject_id,
+                    relation: "about".into(),
+                    ccl: ccl.to_string(),
+                    valid_from: None,
+                    valid_until: None,
+                    weight: 1.0,
+                })?;
+            }
+        }
+
         Ok(WriteOutcome::RememberedStm)
+    }
+
+    /// Reuse the thread's subject node for a `dataId` (refreshing it so it stays
+    /// alive while referenced), or create it. Subject nodes are graph anchors, so
+    /// they carry a zero embedding — they're reached via `about` edges, never by
+    /// vector search.
+    async fn find_or_create_subject(
+        &self,
+        tenant_id: &TenantId,
+        context_key: &str,
+        ccl: &str,
+        subject: &crate::application::reset_service::SubjectRef,
+    ) -> Result<i64> {
+        if let Some(existing) =
+            self.stm
+                .find_working_subject(tenant_id, context_key, &subject.data_id)?
+        {
+            // A read/reference reinforces — keep the anchor hot for the session.
+            self.stm.boost_relevance(&[existing])?;
+            return Ok(existing);
+        }
+        let node = MemoryNode {
+            id: None,
+            tenant_id: tenant_id.clone(),
+            source_episode_id: None,
+            payload: serde_json::json!({
+                "fact": subject.label,
+                "kind": "subject",
+                "dataId": subject.data_id,
+            }),
+            status: "active".into(),
+            ccl: ccl.to_string(),
+            is_explicit: true,
+            support_count: 1,
+            relevance_score: 1.0,
+            context_key: Some(context_key.to_string()),
+        };
+        self.stm.store_node(&node, &self.zero_embedding())
+    }
+
+    /// A zero vector at the STM embedding dimension, for graph-anchor nodes that
+    /// don't need semantic search.
+    fn zero_embedding(&self) -> Vec<f32> {
+        vec![0.0; self.stm_vector_dim]
     }
 
     async fn remember_ltm(&self, cmd: &RememberCommand) -> Result<WriteOutcome> {
@@ -242,6 +317,7 @@ mod tests {
             ltm.clone() as Arc<dyn LtmRepository>,
             ingest.clone(),
             Arc::new(StubLlm),
+            DIM,
         );
         Harness {
             write,
@@ -262,7 +338,93 @@ mod tests {
             context_key: None,
             tags: vec![],
             tenant: None,
+            subjects: vec![],
         })
+    }
+
+    fn remember_with_subjects(
+        command_id: &str,
+        fact: &str,
+        context_key: &str,
+        subjects: &[(&str, &str)],
+    ) -> MemoryCommand {
+        MemoryCommand::Remember(RememberCommand {
+            command_id: command_id.into(),
+            scope: WriteScope::Stm,
+            fact: Some(fact.into()),
+            text: None,
+            ccl: Some("working".into()),
+            context_key: Some(context_key.into()),
+            tags: vec![],
+            tenant: None,
+            subjects: subjects
+                .iter()
+                .map(
+                    |(id, label)| crate::application::reset_service::SubjectRef {
+                        data_id: (*id).into(),
+                        label: (*label).into(),
+                    },
+                )
+                .collect(),
+        })
+    }
+
+    /// A working turn about a document builds a reused subject node (the graph
+    /// anchor). A later turn about the same document reuses it — not a duplicate.
+    #[tokio::test]
+    async fn remember_stm_subjects_build_and_reuse_the_graph_anchor() {
+        let h = harness();
+        let ctx = "chat.1";
+
+        h.write
+            .handle(&remember_with_subjects(
+                "cmd_g1",
+                "find my last lululemon purchase",
+                ctx,
+                &[("doc_LL", "Lululemon order")],
+            ))
+            .await
+            .unwrap();
+        let subj1 = h
+            .stm
+            .find_working_subject(&h.tenant, ctx, "doc_LL")
+            .unwrap();
+        assert!(subj1.is_some(), "subject anchor created for doc_LL");
+        assert!(stm_has(&h, "Lululemon order"), "subject label stored");
+
+        // A second turn about the SAME document reuses the same anchor node
+        // (find returns newest-by-id; an equal id proves no duplicate was made).
+        h.write
+            .handle(&remember_with_subjects(
+                "cmd_g2",
+                "what is its document id",
+                ctx,
+                &[("doc_LL", "Lululemon order")],
+            ))
+            .await
+            .unwrap();
+        let subj2 = h
+            .stm
+            .find_working_subject(&h.tenant, ctx, "doc_LL")
+            .unwrap();
+        assert_eq!(subj1, subj2, "subject reused across turns, not duplicated");
+
+        // A different thread gets its OWN anchor (context isolation).
+        h.write
+            .handle(&remember_with_subjects(
+                "cmd_g3",
+                "find lululemon",
+                "chat.2",
+                &[("doc_LL", "Lululemon order")],
+            ))
+            .await
+            .unwrap();
+        let other = h
+            .stm
+            .find_working_subject(&h.tenant, "chat.2", "doc_LL")
+            .unwrap();
+        assert!(other.is_some());
+        assert_ne!(other, subj1, "each thread anchors its own subject");
     }
 
     fn stm_has(h: &Harness, needle: &str) -> bool {
@@ -339,6 +501,7 @@ mod tests {
             context_key: None,
             tags: vec!["jarvis".into()],
             tenant: None,
+            subjects: vec![],
         });
         let outcome = h.write.handle(&cmd).await.unwrap();
         let WriteOutcome::RememberedLtm { data_id, .. } = outcome else {
@@ -362,6 +525,7 @@ mod tests {
             context_key: Some("chat.jid:1".into()),
             tags: vec![],
             tenant: None,
+            subjects: vec![],
         });
         let outcome = h.write.handle(&cmd).await.unwrap();
         assert_eq!(outcome, WriteOutcome::RememberedStm);
@@ -389,6 +553,7 @@ mod tests {
             context_key: None,
             tags: vec![],
             tenant: None,
+            subjects: vec![],
         });
         assert!(h.write.handle(&bad).await.is_err());
     }
