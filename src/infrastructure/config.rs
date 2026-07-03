@@ -105,9 +105,11 @@ pub struct PithosConfig {
     pub token: String,
 }
 
-/// How often the background STM decay sweep runs (`run_decay_sweep`, wired in
-/// slice 2). The sweep applies one half-life day of decay per pass, so the
-/// default cadence is daily.
+/// How often the background STM decay sweep runs (`run_decay_sweep`). The sweep
+/// decays each node by its *real* elapsed time (not a fixed pass), so a frequent
+/// cadence is safe — it never over-decays durable facts. The default is a few
+/// minutes so short-half-life `working` notes actually expire soon after they go
+/// cold, rather than lingering until a daily pass.
 #[derive(Debug, Deserialize, Clone)]
 pub struct SweepConfig {
     pub interval_secs: u64,
@@ -198,8 +200,9 @@ impl AppConfig {
             .set_default("kafka.group_id", "neurolithe")?
             .set_default("pithos.base_url", "http://192.168.4.48:8080")?
             .set_default("pithos.token", "")?
-            // Daily decay sweep (sweep applies one half-life day per pass).
-            .set_default("sweep.interval_secs", 86_400_i64)?
+            // Frequent decay sweep (real-elapsed decay makes this safe); short
+            // enough that cold `working` notes expire within minutes.
+            .set_default("sweep.interval_secs", 300_i64)?
             .set_default("metrics.interval_secs", 60_i64)?
             .set_default("feeder.enabled", true)?
             .set_default("bus_query.enabled", true)?
@@ -246,7 +249,7 @@ mod tests {
         assert_eq!(cfg.kafka.brokers, "localhost:9092");
         assert_eq!(cfg.kafka.group_id, "neurolithe");
         assert_eq!(cfg.pithos.base_url, "http://192.168.4.48:8080");
-        assert_eq!(cfg.sweep.interval_secs, 86_400);
+        assert_eq!(cfg.sweep.interval_secs, 300);
         assert_eq!(cfg.metrics.interval_secs, 60);
         assert!(cfg.feeder.enabled);
         assert!(cfg.bus_query.enabled);
