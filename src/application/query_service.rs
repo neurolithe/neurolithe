@@ -161,9 +161,14 @@ impl QueryService {
         // (2) Semantic enrichment — only when the request carries query text.
         let query = req.query.trim();
         if !query.is_empty() {
-            // Search both the working notes and durable facts so enrichment can
-            // surface related knowledge, not just other situational notes.
-            let enrich_ccl = vec![WORKING_CCL.to_string(), DEFAULT_CCL.to_string()];
+            // Enrichment stays within the `working` layer — other *situational*
+            // notes (possibly from another thread; shared awareness, design §5).
+            // It must NOT reach into `reality` knowledge: an information-poor
+            // follow-up ("what is its id?") would otherwise dredge up arbitrary
+            // documents and the agent would answer about the wrong one (the
+            // slice-10 failure). Durable knowledge is reached via the explicit
+            // `memory.query` tool, never auto-injected into the situational map.
+            let enrich_ccl = vec![WORKING_CCL.to_string()];
             let mut semantic = self
                 .retrieval
                 .query(&tenant, query, &req.time_filter, &enrich_ccl)

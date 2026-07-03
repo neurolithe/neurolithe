@@ -412,12 +412,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stm_map_appends_semantic_after_recency_deduped() {
+    async fn stm_map_appends_semantic_working_notes_but_not_reality() {
         let f = fixture(false);
-        // Backbone note in the active thread, plus a durable fact — both mention
-        // "inspection" so the semantic pass matches both.
+        // Backbone note in the active thread; a working note in ANOTHER thread
+        // (shared awareness, surfaced by enrichment); and a reality knowledge
+        // fact that must NEVER enter the situational map — all mention
+        // "inspection" so the semantic pass would match each by keyword.
         seed_working_note(&f.stm, "jarvis", "inspection report = doc_42", "chat.1");
-        seed_stm_fact(&f.stm, "jarvis", "inspection checklist tips");
+        seed_working_note(
+            &f.stm,
+            "jarvis",
+            "inspection follow-up from chat 2",
+            "chat.2",
+        );
+        seed_stm_fact(&f.stm, "jarvis", "inspection checklist tips"); // reality
 
         let with_query: MemoryQuery = serde_json::from_value(serde_json::json!({
             "correlationId": "c1",
@@ -428,15 +436,21 @@ mod tests {
         .unwrap();
         let reply = f.consumer.respond(&with_query).await;
 
-        // Backbone (working note) first, then the deduped semantic extra.
+        // Backbone (this thread's working note) first.
         assert_eq!(reply.stm[0].fact, "inspection report = doc_42");
         assert_eq!(reply.stm[0].context_key.as_deref(), Some("chat.1"));
         let facts: Vec<&str> = reply.stm.iter().map(|e| e.fact.as_str()).collect();
+        // A working note from another thread IS surfaced (shared awareness)…
         assert!(
-            facts.contains(&"inspection checklist tips"),
-            "semantic extra appended"
+            facts.contains(&"inspection follow-up from chat 2"),
+            "cross-thread working note appended as enrichment"
         );
-        // The backbone note appears exactly once (deduped, not duplicated).
+        // …but the reality knowledge fact is NOT (would mislead follow-ups).
+        assert!(
+            !facts.contains(&"inspection checklist tips"),
+            "reality knowledge must not enter the situational map"
+        );
+        // Backbone deduped — appears exactly once.
         assert_eq!(
             facts
                 .iter()
@@ -448,9 +462,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stm_map_without_context_degrades_to_semantic_only() {
+    async fn stm_map_without_context_degrades_to_semantic_working_only() {
         let f = fixture(false);
-        seed_stm_fact(&f.stm, "jarvis", "inspection checklist tips");
+        // A working note (some other thread) matches; a reality fact does not.
+        seed_working_note(&f.stm, "jarvis", "inspection note from a thread", "chat.9");
+        seed_stm_fact(&f.stm, "jarvis", "inspection checklist tips"); // reality, excluded
 
         // No contextKey, but a query → backbone empty, semantic still runs.
         let no_ctx: MemoryQuery = serde_json::from_value(serde_json::json!({
@@ -462,7 +478,14 @@ mod tests {
         let reply = f.consumer.respond(&no_ctx).await;
 
         let facts: Vec<&str> = reply.stm.iter().map(|e| e.fact.as_str()).collect();
-        assert!(facts.contains(&"inspection checklist tips"));
+        assert!(
+            facts.contains(&"inspection note from a thread"),
+            "working note surfaced by semantic-only fallback"
+        );
+        assert!(
+            !facts.contains(&"inspection checklist tips"),
+            "reality knowledge stays out of the situational map"
+        );
     }
 
     #[tokio::test]
