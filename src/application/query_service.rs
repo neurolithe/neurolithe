@@ -128,63 +128,32 @@ impl QueryService {
         }
     }
 
-    /// Working-memory map (STM-WORKING-MEMORY §5): **recency-first, semantics as
-    /// enrichment.**
+    /// Working-memory map (STM-WORKING-MEMORY §5):
+    /// **Pure context-scoped recency** — the only thing that reliably resolves
+    /// an information-poor follow-up ("what is *its* id?"). It returns the most
+    /// recent working notes *in this exact thread* and nothing else.
     ///
-    /// 1. Backbone — the passive recency read for the request's `context_key`
-    ///    (no embedding hop). This is what resolves information-poor follow-ups
-    ///    ("what's *its* id?").
-    /// 2. Enrichment — *only if* the request carries query text, one hybrid
-    ///    search (over `working` + `reality`) whose hits are appended **after**
-    ///    the backbone, deduped by fact text. Recency always comes first.
-    ///
-    /// With no `context_key` the backbone is empty; the map degrades gracefully
-    /// to semantic-only (when a query is present) or an empty map. **No LLM /
-    /// embedding call is made when `query` is absent.**
+    /// It deliberately does **no** vector/semantic search. An earlier design
+    /// enriched the map with a similarity search, but live use showed that fuzzy
+    /// "find something similar" is wrong for a situational map: it dragged in
+    /// unrelated documents (reality) and other threads' notes, so the agent
+    /// answered about the wrong thing. Durable/semantic recall stays where it
+    /// belongs — behind the explicit `memory.query` tool the agent invokes with
+    /// its own precise query. With no `context_key` there is no thread to orient
+    /// by, so the map is empty.
     async fn stm_map(&self, req: &QueryRequest) -> Result<Vec<MemoryResult>> {
-        let tenant = TenantId(req.tenant.clone());
-
-        // (1) Recency backbone — requires a thread to orient by.
-        let mut results: Vec<MemoryResult> = if let Some(context_key) = req.context_key.as_deref() {
-            // `stm_map` defaults to the working layer; an explicit ccl overrides.
-            let ccl_filter: Vec<String> = if req.ccl.is_empty() {
-                vec![WORKING_CCL.to_string()]
-            } else {
-                req.ccl.clone()
-            };
-            self.retrieval
-                .recent_in_context(&tenant, &ccl_filter, context_key, req.k)?
-        } else {
-            Vec::new()
+        let Some(context_key) = req.context_key.as_deref() else {
+            return Ok(Vec::new());
         };
-
-        // (2) Semantic enrichment — only when the request carries query text.
-        let query = req.query.trim();
-        if !query.is_empty() {
-            // Enrichment stays within the `working` layer — other *situational*
-            // notes (possibly from another thread; shared awareness, design §5).
-            // It must NOT reach into `reality` knowledge: an information-poor
-            // follow-up ("what is its id?") would otherwise dredge up arbitrary
-            // documents and the agent would answer about the wrong one (the
-            // slice-10 failure). Durable knowledge is reached via the explicit
-            // `memory.query` tool, never auto-injected into the situational map.
-            let enrich_ccl = vec![WORKING_CCL.to_string()];
-            let mut semantic = self
-                .retrieval
-                .query(&tenant, query, &req.time_filter, &enrich_ccl)
-                .await?;
-            semantic.truncate(req.k);
-
-            let seen: std::collections::HashSet<String> =
-                results.iter().map(|r| r.fact.clone()).collect();
-            for m in semantic {
-                if !seen.contains(&m.fact) {
-                    results.push(m);
-                }
-            }
-        }
-
-        Ok(results)
+        let tenant = TenantId(req.tenant.clone());
+        // `stm_map` defaults to the working layer; an explicit ccl overrides.
+        let ccl_filter: Vec<String> = if req.ccl.is_empty() {
+            vec![WORKING_CCL.to_string()]
+        } else {
+            req.ccl.clone()
+        };
+        self.retrieval
+            .recent_in_context(&tenant, &ccl_filter, context_key, req.k)
     }
 
     /// STM hybrid search, truncated to the requested breadth `k`. An empty CCL
