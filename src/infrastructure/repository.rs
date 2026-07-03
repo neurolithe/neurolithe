@@ -12,6 +12,43 @@ impl SqliteMemoryRepository {
     pub fn new(conn: Connection) -> Self {
         Self { conn }
     }
+
+    /// The `about` subjects of a turn (STM-GRAPH), as connections: one per
+    /// `turn —about→ subject` edge, entity = "label (dataId)" so the caller sees
+    /// both the human label and the id it needs to act on.
+    fn about_subjects(&self, turn_id: i64) -> Result<Vec<crate::domain::models::MemoryConnection>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT json_extract(s.payload, '$.fact'), json_extract(s.payload, '$.dataId')
+             FROM edges e JOIN nodes s ON s.id = e.target_id
+             WHERE e.source_id = ?1 AND e.relation = 'about'
+             ORDER BY s.id",
+        )?;
+        let rows = stmt.query_map(params![turn_id], |row| {
+            let label: Option<String> = row.get(0)?;
+            let data_id: Option<String> = row.get(1)?;
+            Ok((label.unwrap_or_default(), data_id.unwrap_or_default()))
+        })?;
+
+        let mut out = Vec::new();
+        for row in rows {
+            let (label, data_id) = row?;
+            let entity = if data_id.is_empty() {
+                label
+            } else if label.is_empty() {
+                data_id
+            } else {
+                format!("{label} ({data_id})")
+            };
+            out.push(crate::domain::models::MemoryConnection {
+                relation: "about".into(),
+                entity,
+                ccl: "working".into(),
+                valid_from: None,
+                valid_until: None,
+            });
+        }
+        Ok(out)
+    }
 }
 
 impl MemoryRepository for SqliteMemoryRepository {
@@ -338,36 +375,50 @@ impl MemoryRepository for SqliteMemoryRepository {
     ) -> Result<Vec<MemoryResult>> {
         let ccl_json = serde_json::to_string(ccl_filter)?;
 
-        // Newest-touched active notes in this exact context. `context_key = ?`
-        // excludes NULL-context knowledge facts (NULL never equals a value) and
-        // other threads. An empty ccl filter matches any layer.
+        // Newest-touched active TURN nodes in this exact context. `context_key =
+        // ?` excludes NULL-context knowledge facts and other threads; the `kind`
+        // guard excludes graph-anchor `subject` nodes (they're reached via edges,
+        // never listed as turns). Old flat notes have no `kind` → treated as
+        // turns. An empty ccl filter matches any layer.
         let mut stmt = self.conn.prepare(
-            "SELECT json_extract(payload, '$.fact'), ccl, updated_at, context_key
+            "SELECT id, json_extract(payload, '$.fact'), ccl, updated_at, context_key
              FROM nodes
              WHERE tenant_id = ?1
                AND status = 'active'
                AND context_key = ?2
+               AND COALESCE(json_extract(payload, '$.kind'), 'turn') != 'subject'
                AND (json_array_length(?3) = 0 OR ccl IN (SELECT value FROM json_each(?3)))
              ORDER BY last_accessed_at DESC, updated_at DESC
              LIMIT ?4",
         )?;
 
-        let rows = stmt.query_map(
-            params![tenant_id.0, context_key, ccl_json, limit as i64],
-            |row| {
-                Ok(crate::domain::models::MemoryResult {
-                    fact: row.get::<_, Option<String>>(0)?.unwrap_or_default(),
-                    ccl: row.get(1)?,
-                    last_updated: row.get(2)?,
-                    connections: Vec::new(),
-                    context_key: row.get(3)?,
-                })
-            },
-        )?;
+        // (id, MemoryResult) — collect first so the connection queries below
+        // don't re-borrow the prepared statement's connection.
+        let turns: Vec<(i64, crate::domain::models::MemoryResult)> = stmt
+            .query_map(
+                params![tenant_id.0, context_key, ccl_json, limit as i64],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        crate::domain::models::MemoryResult {
+                            fact: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                            ccl: row.get(2)?,
+                            last_updated: row.get(3)?,
+                            connections: Vec::new(),
+                            context_key: row.get(4)?,
+                        },
+                    ))
+                },
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
 
-        let mut results = Vec::new();
-        for r in rows {
-            results.push(r?);
+        // Attach each turn's `about` subjects (STM-GRAPH) as connections, so the
+        // caller sees what each turn was about — and the newest turn's subjects
+        // are the current focus.
+        let mut results = Vec::with_capacity(turns.len());
+        for (turn_id, mut turn) in turns {
+            turn.connections = self.about_subjects(turn_id)?;
+            results.push(turn);
         }
         Ok(results)
     }
@@ -1169,6 +1220,67 @@ mod tests {
             vec!["B second", "A first"],
             "only chat.1 active working notes, newest first"
         );
+    }
+
+    /// STM-GRAPH recall (N2): a turn is returned with its `about` subjects
+    /// attached as connections (label + dataId), and the subject anchor node is
+    /// NOT itself listed as a turn.
+    #[test]
+    fn test_recent_in_context_attaches_about_subjects() {
+        let repo = setup_concrete();
+        let t = TenantId("t".into());
+
+        // A turn node (kind:turn) in the thread.
+        let turn = MemoryNode {
+            id: None,
+            tenant_id: t.clone(),
+            source_episode_id: None,
+            payload: json!({ "fact": "find my lululemon purchase", "kind": "turn" }),
+            status: "active".into(),
+            ccl: "working".into(),
+            is_explicit: true,
+            support_count: 1,
+            relevance_score: 1.0,
+            context_key: Some("chat.1".into()),
+        };
+        let turn_id = repo.store_node(&turn, &[0.1; 4]).unwrap();
+
+        // A subject anchor (kind:subject, dataId) + an `about` edge.
+        let subject = MemoryNode {
+            id: None,
+            tenant_id: t.clone(),
+            source_episode_id: None,
+            payload: json!({ "fact": "Lululemon order", "kind": "subject", "dataId": "doc_LL" }),
+            status: "active".into(),
+            ccl: "working".into(),
+            is_explicit: true,
+            support_count: 1,
+            relevance_score: 1.0,
+            context_key: Some("chat.1".into()),
+        };
+        let subject_id = repo.store_node(&subject, &[0.0; 4]).unwrap();
+        repo.store_edge(&crate::domain::models::Edge {
+            source_id: turn_id,
+            target_id: subject_id,
+            relation: "about".into(),
+            ccl: "working".into(),
+            valid_from: None,
+            valid_until: None,
+            weight: 1.0,
+        })
+        .unwrap();
+
+        let out = repo
+            .recent_in_context(&t, &["working".to_string()], "chat.1", 10)
+            .unwrap();
+
+        // Exactly one TURN (the subject anchor is not listed as a turn).
+        assert_eq!(out.len(), 1, "only the turn is returned, not the subject");
+        assert_eq!(out[0].fact, "find my lululemon purchase");
+        // …carrying its about-subject with the dataId the agent needs.
+        assert_eq!(out[0].connections.len(), 1);
+        assert_eq!(out[0].connections[0].relation, "about");
+        assert_eq!(out[0].connections[0].entity, "Lululemon order (doc_LL)");
     }
 
     /// `recent_in_context` respects the limit and an empty ccl filter matches any
