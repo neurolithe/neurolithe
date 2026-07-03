@@ -468,25 +468,28 @@ impl MemoryRepository for SqliteMemoryRepository {
     fn sweep_decay(&self, engine: &crate::domain::decay::DecayEngine) -> Result<()> {
         let mut stmt = self
             .conn
-            .prepare("SELECT id, relevance_score, status FROM nodes WHERE status = 'active'")?;
+            .prepare("SELECT id, relevance_score, ccl FROM nodes WHERE status = 'active'")?;
 
         let nodes_to_update: Result<Vec<(i64, f64, String)>> = stmt
             .query_map([], |row| {
                 let id: i64 = row.get(0)?;
                 let current_score: f64 = row.get(1)?;
-                let status: String = row.get(2)?;
-                Ok((id, current_score, status))
+                let ccl: String = row.get(2)?;
+                Ok((id, current_score, ccl))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into);
 
         let nodes = nodes_to_update?;
 
+        // One "day" of decay per pass (incremental model); the half-life is
+        // resolved from each node's CCL, so `working` notes fade far faster than
+        // `reality` facts on the same pass.
         let days_elapsed = 1.0;
 
         let tx = self.conn.unchecked_transaction()?;
-        for (id, current_score, _) in nodes {
-            let new_score = engine.calculate_decay(current_score, days_elapsed);
+        for (id, current_score, ccl) in nodes {
+            let new_score = engine.calculate_decay_for(current_score, days_elapsed, &ccl);
             let new_status = if new_score < 0.1 {
                 "archived"
             } else {
@@ -959,6 +962,60 @@ mod tests {
         let (f_score, f_status) = score_status(&repo, faint);
         assert!(f_score < 0.1, "faint decayed below threshold");
         assert_eq!(f_status, "archived");
+    }
+
+    /// One sweep pass resolves the half-life per CCL: a `working` note (30-minute
+    /// half-life) is archived while a `reality` fact (7-day half-life) at the
+    /// same score survives — the core of the working regime.
+    #[test]
+    fn test_sweep_resolves_half_life_per_ccl() {
+        use crate::domain::decay::DecayEngine;
+        let repo = setup_concrete();
+        let t = TenantId("t".into());
+
+        let reality = repo
+            .store_node(&active_node(&t, "durable fact", 1.0), &[0.0; 4])
+            .unwrap();
+
+        let mut working_node = active_node(&t, "found report = doc_1", 1.0);
+        working_node.ccl = "working".into();
+        working_node.context_key = Some("chat.jid:1".into());
+        let working = repo.store_node(&working_node, &[0.1; 4]).unwrap();
+
+        // reality 7 days, working 30 minutes.
+        repo.sweep_decay(&DecayEngine::with_half_lives(7.0, 30.0 / 1440.0))
+            .unwrap();
+
+        let (r_score, r_status) = score_status(&repo, reality);
+        assert_eq!(r_status, "active", "reality fact survives one pass");
+        assert!(r_score > 0.5, "reality barely decays, got {r_score}");
+
+        let (w_score, w_status) = score_status(&repo, working);
+        assert_eq!(w_status, "archived", "working note archived in one pass");
+        assert!(w_score < 0.1, "working note decayed hard, got {w_score}");
+    }
+
+    /// Reads reinforce a `working` note exactly as they do facts: a boost resets
+    /// a decayed situational note to active/1.0, keeping an in-use session hot
+    /// between sweeps.
+    #[test]
+    fn test_boost_keeps_working_note_alive() {
+        let repo = setup_concrete();
+        let t = TenantId("t".into());
+
+        let mut note = active_node(&t, "found report = doc_1", 0.2);
+        note.ccl = "working".into();
+        note.context_key = Some("chat.jid:1".into());
+        let id = repo.store_node(&note, &[0.1; 4]).unwrap();
+
+        repo.boost_relevance(&[id]).unwrap();
+
+        let (score, status) = score_status(&repo, id);
+        assert!(
+            (score - 1.0).abs() < 1e-9,
+            "boost reinforces the working note"
+        );
+        assert_eq!(status, "active");
     }
 
     /// Reading a node (boost) resets its relevance score to 1.0 — querying is

@@ -1,5 +1,13 @@
 use serde::{Deserialize, Serialize};
 
+/// The default cognitive layer for knowledge facts (documents, extracted facts).
+pub const REALITY_CCL: &str = "reality";
+
+/// The working-memory layer: short-lived situational notes the agent leaves for
+/// itself (STM-WORKING-MEMORY). Decays on a much shorter half-life than
+/// `reality` so stale session context fades fast (see [`crate::domain::decay`]).
+pub const WORKING_CCL: &str = "working";
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TenantId(pub String);
 
