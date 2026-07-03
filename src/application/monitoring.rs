@@ -154,6 +154,7 @@ mod tests {
             is_explicit: true,
             support_count: 1,
             relevance_score: score,
+            context_key: None,
         }
     }
 

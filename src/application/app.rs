@@ -140,6 +140,7 @@ impl NeurolitheApp {
             is_explicit: true,
             support_count: 1,
             relevance_score: 1.0,
+            context_key: None,
         };
 
         self.memory_repo.store_node(&node, &embedding)?;

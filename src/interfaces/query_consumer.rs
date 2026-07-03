@@ -314,6 +314,7 @@ mod tests {
             is_explicit: true,
             support_count: 1,
             relevance_score: 1.0,
+            context_key: None,
         };
         stm.store_node(&node, &[0.1_f32; DIM]).unwrap();
     }

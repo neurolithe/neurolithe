@@ -71,8 +71,8 @@ impl MemoryRepository for SqliteMemoryRepository {
         let tx = self.conn.unchecked_transaction()?;
 
         tx.execute(
-            "INSERT INTO nodes (tenant_id, source_episode_id, payload, status, ccl, is_explicit, support_count, relevance_score) 
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO nodes (tenant_id, source_episode_id, payload, status, ccl, is_explicit, support_count, relevance_score, context_key)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 node.tenant_id.0,
                 node.source_episode_id,
@@ -81,7 +81,8 @@ impl MemoryRepository for SqliteMemoryRepository {
                 node.ccl,
                 node.is_explicit,
                 node.support_count,
-                node.relevance_score
+                node.relevance_score,
+                node.context_key
             ],
         )?;
         let node_id = tx.last_insert_rowid();
@@ -143,8 +144,8 @@ impl MemoryRepository for SqliteMemoryRepository {
             ranked_matches AS (
                 SELECT node_id, SUM(score) as combined_score FROM hybrid_matches GROUP BY node_id ORDER BY combined_score LIMIT ?3
             )
-            SELECT 
-                n.id, n.tenant_id, n.source_episode_id, n.payload, n.status, n.ccl, n.is_explicit, n.support_count, n.relevance_score
+            SELECT
+                n.id, n.tenant_id, n.source_episode_id, n.payload, n.status, n.ccl, n.is_explicit, n.support_count, n.relevance_score, n.context_key
             FROM nodes n
             JOIN ranked_matches rm ON n.id = rm.node_id
             WHERE n.tenant_id = ?4 AND n.status = 'active'
@@ -167,6 +168,7 @@ impl MemoryRepository for SqliteMemoryRepository {
                     is_explicit: row.get(6)?,
                     support_count: row.get(7)?,
                     relevance_score: row.get(8)?,
+                    context_key: row.get(9)?,
                 })
             },
         )?;
@@ -361,7 +363,7 @@ impl MemoryRepository for SqliteMemoryRepository {
         };
 
         let query = "
-            SELECT n.id, n.tenant_id, n.source_episode_id, n.payload, n.status, n.ccl, n.is_explicit, n.support_count, n.relevance_score, v.distance
+            SELECT n.id, n.tenant_id, n.source_episode_id, n.payload, n.status, n.ccl, n.is_explicit, n.support_count, n.relevance_score, n.context_key, v.distance
             FROM vec_nodes v
             JOIN nodes n ON n.id = v.node_id
             WHERE v.embedding MATCH ?1 AND k = ?2
@@ -386,6 +388,7 @@ impl MemoryRepository for SqliteMemoryRepository {
                     is_explicit: row.get(6)?,
                     support_count: row.get(7)?,
                     relevance_score: row.get(8)?,
+                    context_key: row.get(9)?,
                 })
             },
         )?;
@@ -680,6 +683,7 @@ mod tests {
             is_explicit: true,
             support_count: 1,
             relevance_score: 1.0,
+            context_key: None,
         };
 
         let dummy_embedding = vec![0.1f32; 1536]; // fake 1536d vector
@@ -690,6 +694,59 @@ mod tests {
         // For testing the internal state (trigger effects), we need another connection or a specialized test method.
         // For now, testing the repository's returned behavior is sufficient since FTS trigger setups are tested
         // separately in schema tests.
+    }
+
+    /// A node's `context_key` round-trips through store + read (slice 1). A
+    /// situational note carries its key; a feeder/knowledge-path node leaves it
+    /// NULL. Reads (here via `find_similar_nodes`) surface the key faithfully.
+    #[test]
+    fn test_context_key_round_trips() {
+        let repo = setup_mem_repo();
+        let tenant = TenantId("ctx-tenant".into());
+
+        // Situational note: distinct embedding + a context key.
+        let mut emb_a = vec![0.0f32; 1536];
+        emb_a[0] = 1.0;
+        let noted = MemoryNode {
+            id: None,
+            tenant_id: tenant.clone(),
+            source_episode_id: None,
+            payload: json!({"fact": "found report = doc_1"}),
+            status: "active".into(),
+            ccl: "working".into(),
+            is_explicit: true,
+            support_count: 1,
+            relevance_score: 1.0,
+            context_key: Some("chat.jid:123".into()),
+        };
+        repo.store_node(&noted, &emb_a).unwrap();
+
+        // Feeder-style knowledge node: different embedding, no context key.
+        let mut emb_b = vec![0.0f32; 1536];
+        emb_b[1] = 1.0;
+        let knowledge = MemoryNode {
+            id: None,
+            tenant_id: tenant.clone(),
+            source_episode_id: None,
+            payload: json!({"fact": "invoice total 42"}),
+            status: "active".into(),
+            ccl: "reality".into(),
+            is_explicit: true,
+            support_count: 1,
+            relevance_score: 1.0,
+            context_key: None,
+        };
+        repo.store_node(&knowledge, &emb_b).unwrap();
+
+        // Reading nearest to emb_a returns the note with its key preserved.
+        let near_a = repo.find_similar_nodes(&emb_a, &tenant, 2.0, 1).unwrap();
+        assert_eq!(near_a.len(), 1);
+        assert_eq!(near_a[0].context_key.as_deref(), Some("chat.jid:123"));
+
+        // Reading nearest to emb_b returns the knowledge node with NULL key.
+        let near_b = repo.find_similar_nodes(&emb_b, &tenant, 2.0, 1).unwrap();
+        assert_eq!(near_b.len(), 1);
+        assert_eq!(near_b[0].context_key, None);
     }
 
     #[test]
@@ -718,6 +775,7 @@ mod tests {
             is_explicit: true,
             support_count: 1,
             relevance_score: 1.0,
+            context_key: None,
         };
         // Node 2: Contains another keyword but vector might be close
         let node2 = MemoryNode {
@@ -730,6 +788,7 @@ mod tests {
             is_explicit: true,
             support_count: 1,
             relevance_score: 0.8,
+            context_key: None,
         };
 
         let emb1 = vec![0.9f32; 1536];
@@ -784,6 +843,7 @@ mod tests {
                 is_explicit: false,
                 support_count: 1,
                 relevance_score: 1.0,
+                context_key: None,
             },
             &vec![0.1; 1536],
         )
@@ -812,6 +872,7 @@ mod tests {
                 is_explicit: false,
                 support_count: 1,
                 relevance_score: 1.0,
+                context_key: None,
             },
             &vec![0.2; 1536],
         )
@@ -853,6 +914,7 @@ mod tests {
             is_explicit: false,
             support_count: 1,
             relevance_score: score,
+            context_key: None,
         }
     }
 

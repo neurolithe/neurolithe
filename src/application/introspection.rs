@@ -189,6 +189,7 @@ mod tests {
                 is_explicit: true,
                 support_count: 1,
                 relevance_score: 0.9,
+                context_key: None,
             },
             &[0.5; DIM],
         )

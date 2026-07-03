@@ -60,6 +60,7 @@ mod tests {
             is_explicit: false,
             support_count: 1,
             relevance_score: 0.15,
+            context_key: None,
         };
 
         // 7 days later, 0.15 becomes 0.075, which is < 0.1

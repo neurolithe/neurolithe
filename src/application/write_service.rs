@@ -118,6 +118,7 @@ impl WriteService {
             is_explicit: true,
             support_count: 1,
             relevance_score: 1.0,
+            context_key: None,
         };
         self.stm.store_node(&node, &embedding)?;
         Ok(WriteOutcome::RememberedStm)
