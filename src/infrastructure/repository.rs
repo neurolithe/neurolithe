@@ -378,8 +378,11 @@ impl MemoryRepository for SqliteMemoryRepository {
             .enumerate()
             .map(|(i, _)| format!("?{}", i + 1))
             .collect();
+        // A read reinforces: score back to 1.0, and the decay clock restarts
+        // (last_decayed_at = now) so an actively-used note stays hot — decay
+        // measures inactivity, not wall-clock age.
         let query = format!(
-            "UPDATE nodes SET relevance_score = 1.0, last_accessed_at = CURRENT_TIMESTAMP WHERE id IN ({})",
+            "UPDATE nodes SET relevance_score = 1.0, last_accessed_at = CURRENT_TIMESTAMP, last_decayed_at = CURRENT_TIMESTAMP WHERE id IN ({})",
             placeholders.join(", ")
         );
         let params: Vec<Box<dyn rusqlite::types::ToSql>> = node_ids
@@ -510,38 +513,42 @@ impl MemoryRepository for SqliteMemoryRepository {
     }
 
     fn sweep_decay(&self, engine: &crate::domain::decay::DecayEngine) -> Result<()> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT id, relevance_score, ccl FROM nodes WHERE status = 'active'")?;
+        // Real-elapsed decay: each node decays by its *true* age in days since it
+        // was last decayed (or last read/created for never-swept rows), not a
+        // fixed pass. This decouples decay from sweep cadence — a note written
+        // seconds ago survives a sweep or restart, and `working` notes archive
+        // only after their real (short) half-life. `julianday` yields days as a
+        // float; a clamp guards against clock skew making elapsed negative.
+        let mut stmt = self.conn.prepare(
+            "SELECT id, relevance_score, ccl,
+                    MAX(0.0, julianday('now') - julianday(COALESCE(last_decayed_at, last_accessed_at))) AS elapsed_days
+             FROM nodes WHERE status = 'active'",
+        )?;
 
-        let nodes_to_update: Result<Vec<(i64, f64, String)>> = stmt
+        let nodes: Vec<(i64, f64, String, f64)> = stmt
             .query_map([], |row| {
-                let id: i64 = row.get(0)?;
-                let current_score: f64 = row.get(1)?;
-                let ccl: String = row.get(2)?;
-                Ok((id, current_score, ccl))
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, f64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, f64>(3)?,
+                ))
             })?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(Into::into);
-
-        let nodes = nodes_to_update?;
-
-        // One "day" of decay per pass (incremental model); the half-life is
-        // resolved from each node's CCL, so `working` notes fade far faster than
-        // `reality` facts on the same pass.
-        let days_elapsed = 1.0;
+            .collect::<rusqlite::Result<Vec<_>>>()?;
 
         let tx = self.conn.unchecked_transaction()?;
-        for (id, current_score, ccl) in nodes {
-            let new_score = engine.calculate_decay_for(current_score, days_elapsed, &ccl);
+        for (id, current_score, ccl, elapsed_days) in nodes {
+            let new_score = engine.calculate_decay_for(current_score, elapsed_days, &ccl);
             let new_status = if new_score < 0.1 {
                 "archived"
             } else {
                 "active"
             };
 
+            // Advance the decay clock so the next sweep measures only *new*
+            // elapsed time (no double-counting).
             tx.execute(
-                "UPDATE nodes SET relevance_score = ?1, status = ?2 WHERE id = ?3",
+                "UPDATE nodes SET relevance_score = ?1, status = ?2, last_decayed_at = CURRENT_TIMESTAMP WHERE id = ?3",
                 params![new_score, new_status, id],
             )?;
         }
@@ -980,37 +987,62 @@ mod tests {
             .unwrap()
     }
 
-    /// One sweep pass decays active nodes by the half-life factor and flips
-    /// any node that falls below 0.1 to `archived`.
+    /// Force a node's decay clock into the past so a sweep sees real elapsed time.
+    fn age_decay_clock(repo: &SqliteMemoryRepository, id: i64, spec: &str) {
+        repo.conn
+            .execute(
+                "UPDATE nodes SET last_decayed_at = datetime('now', ?2) WHERE id = ?1",
+                params![id, spec],
+            )
+            .unwrap();
+    }
+
+    /// A sweep decays each node by its *real* elapsed age. A node aged one
+    /// half-life halves; one below 0.1 flips to `archived`. A *fresh* node (no
+    /// elapsed time) is untouched — the property that stops a sweep/restart from
+    /// wiping just-written working notes.
     #[test]
-    fn test_sweep_decays_active_and_archives_below_threshold() {
+    fn test_sweep_decays_by_real_elapsed_age() {
         use crate::domain::decay::DecayEngine;
         let repo = setup_concrete();
         let t = TenantId("t".into());
 
-        // half_life = 1 day, sweep applies 1 day -> decay factor 0.5.
+        // Aged one full day at half_life = 1 day -> factor 0.5.
         let healthy = repo
             .store_node(&active_node(&t, "healthy", 1.0), &[0.0; 4])
             .unwrap();
-        // 0.15 * 0.5 = 0.075 < 0.1 -> archived.
+        age_decay_clock(&repo, healthy, "-1 day");
+        // 0.15 aged one day -> 0.075 < 0.1 -> archived.
         let faint = repo
             .store_node(&active_node(&t, "faint", 0.15), &[0.1; 4])
+            .unwrap();
+        age_decay_clock(&repo, faint, "-1 day");
+        // Fresh node (clock = now) must NOT decay on this sweep.
+        let fresh = repo
+            .store_node(&active_node(&t, "fresh", 1.0), &[0.2; 4])
             .unwrap();
 
         repo.sweep_decay(&DecayEngine::new(1.0)).unwrap();
 
         let (h_score, h_status) = score_status(&repo, healthy);
-        assert!((h_score - 0.5).abs() < 1e-9, "healthy decayed to 0.5");
+        assert!((h_score - 0.5).abs() < 1e-3, "healthy ~0.5, got {h_score}");
         assert_eq!(h_status, "active");
 
         let (f_score, f_status) = score_status(&repo, faint);
         assert!(f_score < 0.1, "faint decayed below threshold");
         assert_eq!(f_status, "archived");
+
+        let (fr_score, fr_status) = score_status(&repo, fresh);
+        assert!(fr_score > 0.99, "fresh node barely moves, got {fr_score}");
+        assert_eq!(
+            fr_status, "active",
+            "a sweep never wipes a just-written note"
+        );
     }
 
-    /// One sweep pass resolves the half-life per CCL: a `working` note (30-minute
-    /// half-life) is archived while a `reality` fact (7-day half-life) at the
-    /// same score survives — the core of the working regime.
+    /// Real-elapsed decay resolves the half-life per CCL: at the *same age* a
+    /// `working` note (30-min half-life) archives while a `reality` fact (7-day)
+    /// survives — the core of the working regime.
     #[test]
     fn test_sweep_resolves_half_life_per_ccl() {
         use crate::domain::decay::DecayEngine;
@@ -1020,23 +1052,54 @@ mod tests {
         let reality = repo
             .store_node(&active_node(&t, "durable fact", 1.0), &[0.0; 4])
             .unwrap();
+        age_decay_clock(&repo, reality, "-2 hours");
 
         let mut working_node = active_node(&t, "found report = doc_1", 1.0);
         working_node.ccl = "working".into();
         working_node.context_key = Some("chat.jid:1".into());
         let working = repo.store_node(&working_node, &[0.1; 4]).unwrap();
+        age_decay_clock(&repo, working, "-2 hours");
 
         // reality 7 days, working 30 minutes.
         repo.sweep_decay(&DecayEngine::with_half_lives(7.0, 30.0 / 1440.0))
             .unwrap();
 
         let (r_score, r_status) = score_status(&repo, reality);
-        assert_eq!(r_status, "active", "reality fact survives one pass");
-        assert!(r_score > 0.5, "reality barely decays, got {r_score}");
+        assert_eq!(r_status, "active", "reality fact survives 2h");
+        assert!(
+            r_score > 0.9,
+            "reality barely decays over hours, got {r_score}"
+        );
 
         let (w_score, w_status) = score_status(&repo, working);
-        assert_eq!(w_status, "archived", "working note archived in one pass");
+        assert_eq!(w_status, "archived", "working note archived after 2h");
         assert!(w_score < 0.1, "working note decayed hard, got {w_score}");
+    }
+
+    /// A boost restarts the decay clock: a note read mid-session survives the
+    /// next sweep even if it was written long ago.
+    #[test]
+    fn test_boost_restarts_decay_clock() {
+        use crate::domain::decay::DecayEngine;
+        let repo = setup_concrete();
+        let t = TenantId("t".into());
+
+        let mut n = active_node(&t, "reused note", 1.0);
+        n.ccl = "working".into();
+        let id = repo.store_node(&n, &[0.1; 4]).unwrap();
+        age_decay_clock(&repo, id, "-2 hours"); // stale...
+
+        repo.boost_relevance(&[id]).unwrap(); // ...but just read → clock resets
+
+        repo.sweep_decay(&DecayEngine::with_half_lives(7.0, 30.0 / 1440.0))
+            .unwrap();
+
+        let (score, status) = score_status(&repo, id);
+        assert_eq!(
+            status, "active",
+            "a just-read working note survives the sweep"
+        );
+        assert!(score > 0.9, "boost + reset clock keeps it hot, got {score}");
     }
 
     /// The recency backbone (slice 3): `recent_in_context` returns only the

@@ -65,6 +65,7 @@ pub fn init_schema(conn: &Connection, vector_dimension: usize) -> rusqlite::Resu
             relevance_score REAL DEFAULT 1.0,
             context_key TEXT,
             last_accessed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            last_decayed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(source_episode_id) REFERENCES episodes(id)
@@ -72,12 +73,16 @@ pub fn init_schema(conn: &Connection, vector_dimension: usize) -> rusqlite::Resu
         [],
     )?;
 
-    // 2b. Working-memory migration: pre-existing stores created before the
-    // `context_key` column need it added (the CREATE above only applies to
-    // fresh DBs). Idempotent — guarded on `pragma_table_info`. The index backs
-    // the recency read (`recent_in_context`, slice 3): newest active notes in a
-    // given tenant/layer/context.
+    // 2b. Working-memory migration: pre-existing stores need the new columns
+    // added (the CREATE above only applies to fresh DBs). Idempotent — guarded
+    // on `pragma_table_info`. `context_key` backs the recency read (slice 3);
+    // `last_decayed_at` backs *real-elapsed* decay (a note decays by its true
+    // age since it was last decayed/read, not a fixed pass — so a sweep or
+    // restart can't wipe fresh working notes). SQLite forbids a non-constant
+    // default on ALTER, so the migrated column is nullable and the sweep
+    // coalesces NULL → `last_accessed_at`.
     add_column_if_missing(conn, "nodes", "context_key", "TEXT")?;
+    add_column_if_missing(conn, "nodes", "last_decayed_at", "DATETIME")?;
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_nodes_context_recency
              ON nodes(tenant_id, ccl, context_key, last_accessed_at DESC)",
