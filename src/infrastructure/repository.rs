@@ -1,4 +1,4 @@
-use crate::domain::models::{Episode, MemoryNode, TenantId};
+use crate::domain::models::{Episode, MemoryNode, MemoryResult, TenantId};
 use crate::domain::ports::MemoryRepository;
 use crate::infrastructure::database::db_size_bytes;
 use anyhow::Result;
@@ -325,6 +325,48 @@ impl MemoryRepository for SqliteMemoryRepository {
             });
         }
 
+        Ok(results)
+    }
+
+    fn recent_in_context(
+        &self,
+        tenant_id: &TenantId,
+        ccl_filter: &[String],
+        context_key: &str,
+        limit: usize,
+    ) -> Result<Vec<MemoryResult>> {
+        let ccl_json = serde_json::to_string(ccl_filter)?;
+
+        // Newest-touched active notes in this exact context. `context_key = ?`
+        // excludes NULL-context knowledge facts (NULL never equals a value) and
+        // other threads. An empty ccl filter matches any layer.
+        let mut stmt = self.conn.prepare(
+            "SELECT json_extract(payload, '$.fact'), ccl, updated_at
+             FROM nodes
+             WHERE tenant_id = ?1
+               AND status = 'active'
+               AND context_key = ?2
+               AND (json_array_length(?3) = 0 OR ccl IN (SELECT value FROM json_each(?3)))
+             ORDER BY last_accessed_at DESC, updated_at DESC
+             LIMIT ?4",
+        )?;
+
+        let rows = stmt.query_map(
+            params![tenant_id.0, context_key, ccl_json, limit as i64],
+            |row| {
+                Ok(crate::domain::models::MemoryResult {
+                    fact: row.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                    ccl: row.get(1)?,
+                    last_updated: row.get(2)?,
+                    connections: Vec::new(),
+                })
+            },
+        )?;
+
+        let mut results = Vec::new();
+        for r in rows {
+            results.push(r?);
+        }
         Ok(results)
     }
 
@@ -993,6 +1035,80 @@ mod tests {
         let (w_score, w_status) = score_status(&repo, working);
         assert_eq!(w_status, "archived", "working note archived in one pass");
         assert!(w_score < 0.1, "working note decayed hard, got {w_score}");
+    }
+
+    /// The recency backbone (slice 3): `recent_in_context` returns only the
+    /// active notes of the requested tenant + context, newest first — excluding
+    /// other contexts, NULL-context knowledge facts, and archived notes.
+    #[test]
+    fn test_recent_in_context_scopes_and_orders() {
+        let repo = setup_concrete();
+        let t = TenantId("t".into());
+
+        // Helper: insert a working note in a context and stamp its recency.
+        let insert = |fact: &str, ctx: Option<&str>, ccl: &str, secs_ago: i64, archived: bool| {
+            let mut n = active_node(&t, fact, 1.0);
+            n.ccl = ccl.into();
+            n.context_key = ctx.map(|c| c.to_string());
+            let id = repo.store_node(&n, &[0.1; 4]).unwrap();
+            repo.conn
+                .execute(
+                    "UPDATE nodes SET last_accessed_at = datetime('now', ?2),
+                                     status = ?3 WHERE id = ?1",
+                    params![
+                        id,
+                        format!("-{secs_ago} seconds"),
+                        if archived { "archived" } else { "active" }
+                    ],
+                )
+                .unwrap();
+            id
+        };
+
+        // Active thread chat.1: two notes, B newer than A.
+        insert("A first", Some("chat.1"), "working", 10, false);
+        insert("B second", Some("chat.1"), "working", 1, false);
+        // Noise that must be excluded:
+        insert("other thread", Some("chat.2"), "working", 0, false); // different context
+        insert("knowledge fact", None, "reality", 0, false); // NULL context
+        insert("archived note", Some("chat.1"), "working", 0, true); // archived, same ctx
+
+        let out = repo
+            .recent_in_context(&t, &["working".to_string()], "chat.1", 10)
+            .unwrap();
+
+        let facts: Vec<&str> = out.iter().map(|r| r.fact.as_str()).collect();
+        assert_eq!(
+            facts,
+            vec!["B second", "A first"],
+            "only chat.1 active working notes, newest first"
+        );
+    }
+
+    /// `recent_in_context` respects the limit and an empty ccl filter matches any
+    /// layer within the context.
+    #[test]
+    fn test_recent_in_context_limit_and_any_ccl() {
+        let repo = setup_concrete();
+        let t = TenantId("t".into());
+
+        for i in 0..5 {
+            let mut n = active_node(&t, &format!("note {i}"), 1.0);
+            n.ccl = "working".into();
+            n.context_key = Some("chat.1".into());
+            let id = repo.store_node(&n, &[0.1; 4]).unwrap();
+            repo.conn
+                .execute(
+                    "UPDATE nodes SET last_accessed_at = datetime('now', ?2) WHERE id = ?1",
+                    params![id, format!("-{i} seconds")],
+                )
+                .unwrap();
+        }
+
+        // Empty ccl filter → any layer; limit caps the result.
+        let out = repo.recent_in_context(&t, &[], "chat.1", 3).unwrap();
+        assert_eq!(out.len(), 3, "limit respected");
+        assert_eq!(out[0].fact, "note 0", "newest first");
     }
 
     /// Reads reinforce a `working` note exactly as they do facts: a boost resets
