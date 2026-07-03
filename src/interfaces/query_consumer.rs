@@ -133,6 +133,7 @@ impl QueryConsumer {
             k: q.k,
             time_filter: q.time_filter.clone().unwrap_or_default(),
             ccl: q.ccl.clone(),
+            context_key: q.context_key.clone(),
         };
         match self.query_service.execute(&req).await {
             Ok(outcome) => to_reply(&q.correlation_id, outcome),

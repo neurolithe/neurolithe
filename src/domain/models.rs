@@ -79,6 +79,11 @@ pub struct MemoryResult {
     pub ccl: String,
     pub last_updated: String,
     pub connections: Vec<MemoryConnection>,
+    /// Working-memory context key, populated only by the recency read
+    /// (`recent_in_context`); `None` on ordinary knowledge retrieval. Lets the
+    /// bus reply tell the agent which thread a situational note belongs to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_key: Option<String>,
 }
 
 /// A 1-hop connection returned in query results

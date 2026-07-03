@@ -12,7 +12,7 @@
 
 use crate::application::ltm_retrieval::{LtmRetrieval, RecallResult};
 use crate::application::retrieval::RetrievalService;
-use crate::domain::models::{MemoryResult, TenantId, TimeFilter};
+use crate::domain::models::{MemoryResult, TenantId, TimeFilter, WORKING_CCL};
 use crate::domain::ports::LlmClient;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -41,6 +41,10 @@ pub enum QueryScope {
     Both,
     /// STM recall seeds the LTM search (the headline, design §5).
     LtmViaStm,
+    /// Working-memory map: recency-first situational notes for a `context_key`,
+    /// with optional semantic enrichment (STM-WORKING-MEMORY §5). No `query`
+    /// text required — recency is the backbone.
+    StmMap,
 }
 
 /// A parsed, defaulted read request (application-layer — no wire types).
@@ -52,6 +56,9 @@ pub struct QueryRequest {
     pub k: usize,
     pub time_filter: TimeFilter,
     pub ccl: Vec<String>,
+    /// Working-memory thread to orient by (`stm_map` only). `None` on ordinary
+    /// reads.
+    pub context_key: Option<String>,
 }
 
 /// The labelled result of a read, before wire mapping.
@@ -111,7 +118,34 @@ impl QueryService {
                 })
             }
             QueryScope::LtmViaStm => self.ltm_via_stm(req).await,
+            QueryScope::StmMap => {
+                let stm = self.stm_map(req).await?;
+                Ok(QueryOutcome {
+                    stm,
+                    ..Default::default()
+                })
+            }
         }
+    }
+
+    /// Working-memory map (STM-WORKING-MEMORY §5): recency-first situational
+    /// notes for the request's `context_key`. The backbone is the passive
+    /// recency read (no embedding); semantic enrichment is layered on in slice
+    /// 5. With no `context_key` there is no thread to orient by, so the map is
+    /// empty (the caller still gets a valid, empty reply).
+    async fn stm_map(&self, req: &QueryRequest) -> Result<Vec<MemoryResult>> {
+        let Some(context_key) = req.context_key.as_deref() else {
+            return Ok(Vec::new());
+        };
+        let tenant = TenantId(req.tenant.clone());
+        // `stm_map` defaults to the working layer; an explicit ccl overrides.
+        let ccl_filter: Vec<String> = if req.ccl.is_empty() {
+            vec![WORKING_CCL.to_string()]
+        } else {
+            req.ccl.clone()
+        };
+        self.retrieval
+            .recent_in_context(&tenant, &ccl_filter, context_key, req.k)
     }
 
     /// STM hybrid search, truncated to the requested breadth `k`. An empty CCL

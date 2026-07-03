@@ -42,6 +42,10 @@ pub struct MemoryQuery {
     #[serde(default = "default_tenant")]
     pub tenant: String,
     pub scope: QueryScope,
+    /// Query text. Optional for `stm_map` (recency needs no text); defaults to
+    /// empty. Required in practice for the semantic scopes — the service treats
+    /// an empty query as "no semantic search".
+    #[serde(default)]
     pub query: String,
     #[serde(default = "default_k")]
     pub k: usize,
@@ -49,6 +53,9 @@ pub struct MemoryQuery {
     pub time_filter: Option<TimeFilter>,
     #[serde(default)]
     pub ccl: Vec<String>,
+    /// Working-memory thread key for `stm_map` (STM-WORKING-MEMORY §5a).
+    #[serde(default)]
+    pub context_key: Option<String>,
 }
 
 /// The outcome of parsing raw `memory.query` bytes — drives the loop's routing:
@@ -126,6 +133,11 @@ pub struct StmEntry {
     pub ccl: String,
     pub last_updated: String,
     pub connections: Vec<StmConnection>,
+    /// Working-memory thread this note belongs to. Present only for `stm_map`
+    /// entries (situational notes); omitted for ordinary STM facts — so old
+    /// consumers and non-working replies are unchanged on the wire.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_key: Option<String>,
 }
 
 impl StmEntry {
@@ -142,6 +154,7 @@ impl StmEntry {
                     entity: c.entity.clone(),
                 })
                 .collect(),
+            context_key: m.context_key.clone(),
         }
     }
 }
@@ -288,6 +301,51 @@ mod tests {
     }
 
     #[test]
+    fn stm_map_parses_without_query_and_carries_context_key() {
+        // Recency needs no query text; contextKey scopes the thread.
+        let bytes = br#"{"correlationId":"c1","scope":"stm_map","contextKey":"chat.jid:42"}"#;
+        let ParseOutcome::Query(q) = parse_query(bytes) else {
+            panic!("expected Query");
+        };
+        assert_eq!(q.scope, QueryScope::StmMap);
+        assert_eq!(q.query, "", "query defaults empty for stm_map");
+        assert_eq!(q.context_key.as_deref(), Some("chat.jid:42"));
+    }
+
+    #[test]
+    fn old_envelope_without_new_fields_still_parses() {
+        // A pre-working-memory request (no contextKey) keeps its defaults.
+        let bytes = br#"{"correlationId":"c1","scope":"stm","query":"hi"}"#;
+        let ParseOutcome::Query(q) = parse_query(bytes) else {
+            panic!("expected Query");
+        };
+        assert!(q.context_key.is_none());
+    }
+
+    #[test]
+    fn stm_entry_context_key_serializes_only_when_present() {
+        let base = StmEntry {
+            fact: "found report = doc_1".into(),
+            ccl: "working".into(),
+            last_updated: "2026-07-02T00:00:00Z".into(),
+            connections: vec![],
+            context_key: Some("chat.jid:42".into()),
+        };
+        let v = serde_json::to_value(&base).unwrap();
+        assert_eq!(v["contextKey"], "chat.jid:42");
+
+        let without = StmEntry {
+            context_key: None,
+            ..base
+        };
+        let v = serde_json::to_value(&without).unwrap();
+        assert!(
+            v.get("contextKey").is_none(),
+            "omitted on the wire when absent"
+        );
+    }
+
+    #[test]
     fn ignores_unknown_fields() {
         let bytes = br#"{"correlationId":"c1","scope":"stm","query":"hi","surprise":42}"#;
         assert!(matches!(parse_query(bytes), ParseOutcome::Query(_)));
@@ -333,6 +391,7 @@ mod tests {
                 valid_from: Some("2026-01-01".to_string()),
                 valid_until: None,
             }],
+            context_key: None,
         };
         let entry = StmEntry::from_memory_result(&m);
         let v = serde_json::to_value(&entry).unwrap();
@@ -407,6 +466,7 @@ mod tests {
                 relation: "at".to_string(),
                 entity: "Kerrisdale".to_string(),
             }],
+            context_key: None,
         }];
         let ltm = vec![LtmEntry {
             concept: "Health / Dental".to_string(),

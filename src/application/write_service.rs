@@ -118,7 +118,7 @@ impl WriteService {
             is_explicit: true,
             support_count: 1,
             relevance_score: 1.0,
-            context_key: None,
+            context_key: cmd.context_key.clone(),
         };
         self.stm.store_node(&node, &embedding)?;
         Ok(WriteOutcome::RememberedStm)
@@ -259,6 +259,7 @@ mod tests {
             fact: Some(fact.into()),
             text: None,
             ccl: None,
+            context_key: None,
             tags: vec![],
             tenant: None,
         })
@@ -335,6 +336,7 @@ mod tests {
             fact: None,
             text: Some("Project JARVIS uses claim-check on Kafka".into()),
             ccl: None,
+            context_key: None,
             tags: vec!["jarvis".into()],
             tenant: None,
         });
@@ -349,6 +351,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn remember_stm_with_context_key_lands_a_working_note() {
+        let h = harness();
+        let cmd = MemoryCommand::Remember(RememberCommand {
+            command_id: "cmd_ctx".into(),
+            scope: WriteScope::Stm,
+            fact: Some("found home-inspection report = doc_42".into()),
+            text: None,
+            ccl: Some("working".into()),
+            context_key: Some("chat.jid:1".into()),
+            tags: vec![],
+            tenant: None,
+        });
+        let outcome = h.write.handle(&cmd).await.unwrap();
+        assert_eq!(outcome, WriteOutcome::RememberedStm);
+
+        // The note is retrievable via the recency backbone under its context.
+        let recent = h
+            .stm
+            .recent_in_context(&h.tenant, &["working".to_string()], "chat.jid:1", 10)
+            .unwrap();
+        assert_eq!(recent.len(), 1);
+        assert!(recent[0].fact.contains("doc_42"));
+        assert_eq!(recent[0].ccl, "working");
+        assert_eq!(recent[0].context_key.as_deref(), Some("chat.jid:1"));
+    }
+
+    #[tokio::test]
     async fn remember_stm_without_fact_errors() {
         let h = harness();
         let bad = MemoryCommand::Remember(RememberCommand {
@@ -357,6 +386,7 @@ mod tests {
             fact: None,
             text: None,
             ccl: None,
+            context_key: None,
             tags: vec![],
             tenant: None,
         });

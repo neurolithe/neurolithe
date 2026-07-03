@@ -49,9 +49,14 @@ pub struct RememberCommand {
     /// LTM note text (`scope=ltm`).
     #[serde(default)]
     pub text: Option<String>,
-    /// Cognitive-context layer for an STM fact (defaults to `reality`).
+    /// Cognitive-context layer for an STM fact (defaults to `reality`; Metis
+    /// passes `working` for situational notes).
     #[serde(default)]
     pub ccl: Option<String>,
+    /// Working-memory thread key stamped on an STM note (STM-WORKING-MEMORY
+    /// §5a). `None` for ordinary knowledge writes.
+    #[serde(default)]
+    pub context_key: Option<String>,
     /// Tags for an LTM note (advisory; not vocabulary-enforced in v1).
     #[serde(default)]
     pub tags: Vec<String>,

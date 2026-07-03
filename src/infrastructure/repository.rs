@@ -322,6 +322,7 @@ impl MemoryRepository for SqliteMemoryRepository {
                 ccl,
                 last_updated: updated_at,
                 connections,
+                context_key: None,
             });
         }
 
@@ -341,7 +342,7 @@ impl MemoryRepository for SqliteMemoryRepository {
         // excludes NULL-context knowledge facts (NULL never equals a value) and
         // other threads. An empty ccl filter matches any layer.
         let mut stmt = self.conn.prepare(
-            "SELECT json_extract(payload, '$.fact'), ccl, updated_at
+            "SELECT json_extract(payload, '$.fact'), ccl, updated_at, context_key
              FROM nodes
              WHERE tenant_id = ?1
                AND status = 'active'
@@ -359,6 +360,7 @@ impl MemoryRepository for SqliteMemoryRepository {
                     ccl: row.get(1)?,
                     last_updated: row.get(2)?,
                     connections: Vec::new(),
+                    context_key: row.get(3)?,
                 })
             },
         )?;
