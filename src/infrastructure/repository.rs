@@ -1,4 +1,4 @@
-use crate::domain::models::{Episode, MemoryNode, TenantId};
+use crate::domain::models::{Episode, MemoryNode, MemoryResult, TenantId};
 use crate::domain::ports::MemoryRepository;
 use crate::infrastructure::database::db_size_bytes;
 use anyhow::Result;
@@ -71,8 +71,8 @@ impl MemoryRepository for SqliteMemoryRepository {
         let tx = self.conn.unchecked_transaction()?;
 
         tx.execute(
-            "INSERT INTO nodes (tenant_id, source_episode_id, payload, status, ccl, is_explicit, support_count, relevance_score) 
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO nodes (tenant_id, source_episode_id, payload, status, ccl, is_explicit, support_count, relevance_score, context_key)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 node.tenant_id.0,
                 node.source_episode_id,
@@ -81,7 +81,8 @@ impl MemoryRepository for SqliteMemoryRepository {
                 node.ccl,
                 node.is_explicit,
                 node.support_count,
-                node.relevance_score
+                node.relevance_score,
+                node.context_key
             ],
         )?;
         let node_id = tx.last_insert_rowid();
@@ -143,8 +144,8 @@ impl MemoryRepository for SqliteMemoryRepository {
             ranked_matches AS (
                 SELECT node_id, SUM(score) as combined_score FROM hybrid_matches GROUP BY node_id ORDER BY combined_score LIMIT ?3
             )
-            SELECT 
-                n.id, n.tenant_id, n.source_episode_id, n.payload, n.status, n.ccl, n.is_explicit, n.support_count, n.relevance_score
+            SELECT
+                n.id, n.tenant_id, n.source_episode_id, n.payload, n.status, n.ccl, n.is_explicit, n.support_count, n.relevance_score, n.context_key
             FROM nodes n
             JOIN ranked_matches rm ON n.id = rm.node_id
             WHERE n.tenant_id = ?4 AND n.status = 'active'
@@ -167,6 +168,7 @@ impl MemoryRepository for SqliteMemoryRepository {
                     is_explicit: row.get(6)?,
                     support_count: row.get(7)?,
                     relevance_score: row.get(8)?,
+                    context_key: row.get(9)?,
                 })
             },
         )?;
@@ -320,9 +322,53 @@ impl MemoryRepository for SqliteMemoryRepository {
                 ccl,
                 last_updated: updated_at,
                 connections,
+                context_key: None,
             });
         }
 
+        Ok(results)
+    }
+
+    fn recent_in_context(
+        &self,
+        tenant_id: &TenantId,
+        ccl_filter: &[String],
+        context_key: &str,
+        limit: usize,
+    ) -> Result<Vec<MemoryResult>> {
+        let ccl_json = serde_json::to_string(ccl_filter)?;
+
+        // Newest-touched active notes in this exact context. `context_key = ?`
+        // excludes NULL-context knowledge facts (NULL never equals a value) and
+        // other threads. An empty ccl filter matches any layer.
+        let mut stmt = self.conn.prepare(
+            "SELECT json_extract(payload, '$.fact'), ccl, updated_at, context_key
+             FROM nodes
+             WHERE tenant_id = ?1
+               AND status = 'active'
+               AND context_key = ?2
+               AND (json_array_length(?3) = 0 OR ccl IN (SELECT value FROM json_each(?3)))
+             ORDER BY last_accessed_at DESC, updated_at DESC
+             LIMIT ?4",
+        )?;
+
+        let rows = stmt.query_map(
+            params![tenant_id.0, context_key, ccl_json, limit as i64],
+            |row| {
+                Ok(crate::domain::models::MemoryResult {
+                    fact: row.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                    ccl: row.get(1)?,
+                    last_updated: row.get(2)?,
+                    connections: Vec::new(),
+                    context_key: row.get(3)?,
+                })
+            },
+        )?;
+
+        let mut results = Vec::new();
+        for r in rows {
+            results.push(r?);
+        }
         Ok(results)
     }
 
@@ -361,7 +407,7 @@ impl MemoryRepository for SqliteMemoryRepository {
         };
 
         let query = "
-            SELECT n.id, n.tenant_id, n.source_episode_id, n.payload, n.status, n.ccl, n.is_explicit, n.support_count, n.relevance_score, v.distance
+            SELECT n.id, n.tenant_id, n.source_episode_id, n.payload, n.status, n.ccl, n.is_explicit, n.support_count, n.relevance_score, n.context_key, v.distance
             FROM vec_nodes v
             JOIN nodes n ON n.id = v.node_id
             WHERE v.embedding MATCH ?1 AND k = ?2
@@ -386,6 +432,7 @@ impl MemoryRepository for SqliteMemoryRepository {
                     is_explicit: row.get(6)?,
                     support_count: row.get(7)?,
                     relevance_score: row.get(8)?,
+                    context_key: row.get(9)?,
                 })
             },
         )?;
@@ -465,25 +512,28 @@ impl MemoryRepository for SqliteMemoryRepository {
     fn sweep_decay(&self, engine: &crate::domain::decay::DecayEngine) -> Result<()> {
         let mut stmt = self
             .conn
-            .prepare("SELECT id, relevance_score, status FROM nodes WHERE status = 'active'")?;
+            .prepare("SELECT id, relevance_score, ccl FROM nodes WHERE status = 'active'")?;
 
         let nodes_to_update: Result<Vec<(i64, f64, String)>> = stmt
             .query_map([], |row| {
                 let id: i64 = row.get(0)?;
                 let current_score: f64 = row.get(1)?;
-                let status: String = row.get(2)?;
-                Ok((id, current_score, status))
+                let ccl: String = row.get(2)?;
+                Ok((id, current_score, ccl))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into);
 
         let nodes = nodes_to_update?;
 
+        // One "day" of decay per pass (incremental model); the half-life is
+        // resolved from each node's CCL, so `working` notes fade far faster than
+        // `reality` facts on the same pass.
         let days_elapsed = 1.0;
 
         let tx = self.conn.unchecked_transaction()?;
-        for (id, current_score, _) in nodes {
-            let new_score = engine.calculate_decay(current_score, days_elapsed);
+        for (id, current_score, ccl) in nodes {
+            let new_score = engine.calculate_decay_for(current_score, days_elapsed, &ccl);
             let new_status = if new_score < 0.1 {
                 "archived"
             } else {
@@ -680,6 +730,7 @@ mod tests {
             is_explicit: true,
             support_count: 1,
             relevance_score: 1.0,
+            context_key: None,
         };
 
         let dummy_embedding = vec![0.1f32; 1536]; // fake 1536d vector
@@ -690,6 +741,59 @@ mod tests {
         // For testing the internal state (trigger effects), we need another connection or a specialized test method.
         // For now, testing the repository's returned behavior is sufficient since FTS trigger setups are tested
         // separately in schema tests.
+    }
+
+    /// A node's `context_key` round-trips through store + read (slice 1). A
+    /// situational note carries its key; a feeder/knowledge-path node leaves it
+    /// NULL. Reads (here via `find_similar_nodes`) surface the key faithfully.
+    #[test]
+    fn test_context_key_round_trips() {
+        let repo = setup_mem_repo();
+        let tenant = TenantId("ctx-tenant".into());
+
+        // Situational note: distinct embedding + a context key.
+        let mut emb_a = vec![0.0f32; 1536];
+        emb_a[0] = 1.0;
+        let noted = MemoryNode {
+            id: None,
+            tenant_id: tenant.clone(),
+            source_episode_id: None,
+            payload: json!({"fact": "found report = doc_1"}),
+            status: "active".into(),
+            ccl: "working".into(),
+            is_explicit: true,
+            support_count: 1,
+            relevance_score: 1.0,
+            context_key: Some("chat.jid:123".into()),
+        };
+        repo.store_node(&noted, &emb_a).unwrap();
+
+        // Feeder-style knowledge node: different embedding, no context key.
+        let mut emb_b = vec![0.0f32; 1536];
+        emb_b[1] = 1.0;
+        let knowledge = MemoryNode {
+            id: None,
+            tenant_id: tenant.clone(),
+            source_episode_id: None,
+            payload: json!({"fact": "invoice total 42"}),
+            status: "active".into(),
+            ccl: "reality".into(),
+            is_explicit: true,
+            support_count: 1,
+            relevance_score: 1.0,
+            context_key: None,
+        };
+        repo.store_node(&knowledge, &emb_b).unwrap();
+
+        // Reading nearest to emb_a returns the note with its key preserved.
+        let near_a = repo.find_similar_nodes(&emb_a, &tenant, 2.0, 1).unwrap();
+        assert_eq!(near_a.len(), 1);
+        assert_eq!(near_a[0].context_key.as_deref(), Some("chat.jid:123"));
+
+        // Reading nearest to emb_b returns the knowledge node with NULL key.
+        let near_b = repo.find_similar_nodes(&emb_b, &tenant, 2.0, 1).unwrap();
+        assert_eq!(near_b.len(), 1);
+        assert_eq!(near_b[0].context_key, None);
     }
 
     #[test]
@@ -718,6 +822,7 @@ mod tests {
             is_explicit: true,
             support_count: 1,
             relevance_score: 1.0,
+            context_key: None,
         };
         // Node 2: Contains another keyword but vector might be close
         let node2 = MemoryNode {
@@ -730,6 +835,7 @@ mod tests {
             is_explicit: true,
             support_count: 1,
             relevance_score: 0.8,
+            context_key: None,
         };
 
         let emb1 = vec![0.9f32; 1536];
@@ -784,6 +890,7 @@ mod tests {
                 is_explicit: false,
                 support_count: 1,
                 relevance_score: 1.0,
+                context_key: None,
             },
             &vec![0.1; 1536],
         )
@@ -812,6 +919,7 @@ mod tests {
                 is_explicit: false,
                 support_count: 1,
                 relevance_score: 1.0,
+                context_key: None,
             },
             &vec![0.2; 1536],
         )
@@ -853,6 +961,7 @@ mod tests {
             is_explicit: false,
             support_count: 1,
             relevance_score: score,
+            context_key: None,
         }
     }
 
@@ -897,6 +1006,134 @@ mod tests {
         let (f_score, f_status) = score_status(&repo, faint);
         assert!(f_score < 0.1, "faint decayed below threshold");
         assert_eq!(f_status, "archived");
+    }
+
+    /// One sweep pass resolves the half-life per CCL: a `working` note (30-minute
+    /// half-life) is archived while a `reality` fact (7-day half-life) at the
+    /// same score survives — the core of the working regime.
+    #[test]
+    fn test_sweep_resolves_half_life_per_ccl() {
+        use crate::domain::decay::DecayEngine;
+        let repo = setup_concrete();
+        let t = TenantId("t".into());
+
+        let reality = repo
+            .store_node(&active_node(&t, "durable fact", 1.0), &[0.0; 4])
+            .unwrap();
+
+        let mut working_node = active_node(&t, "found report = doc_1", 1.0);
+        working_node.ccl = "working".into();
+        working_node.context_key = Some("chat.jid:1".into());
+        let working = repo.store_node(&working_node, &[0.1; 4]).unwrap();
+
+        // reality 7 days, working 30 minutes.
+        repo.sweep_decay(&DecayEngine::with_half_lives(7.0, 30.0 / 1440.0))
+            .unwrap();
+
+        let (r_score, r_status) = score_status(&repo, reality);
+        assert_eq!(r_status, "active", "reality fact survives one pass");
+        assert!(r_score > 0.5, "reality barely decays, got {r_score}");
+
+        let (w_score, w_status) = score_status(&repo, working);
+        assert_eq!(w_status, "archived", "working note archived in one pass");
+        assert!(w_score < 0.1, "working note decayed hard, got {w_score}");
+    }
+
+    /// The recency backbone (slice 3): `recent_in_context` returns only the
+    /// active notes of the requested tenant + context, newest first — excluding
+    /// other contexts, NULL-context knowledge facts, and archived notes.
+    #[test]
+    fn test_recent_in_context_scopes_and_orders() {
+        let repo = setup_concrete();
+        let t = TenantId("t".into());
+
+        // Helper: insert a working note in a context and stamp its recency.
+        let insert = |fact: &str, ctx: Option<&str>, ccl: &str, secs_ago: i64, archived: bool| {
+            let mut n = active_node(&t, fact, 1.0);
+            n.ccl = ccl.into();
+            n.context_key = ctx.map(|c| c.to_string());
+            let id = repo.store_node(&n, &[0.1; 4]).unwrap();
+            repo.conn
+                .execute(
+                    "UPDATE nodes SET last_accessed_at = datetime('now', ?2),
+                                     status = ?3 WHERE id = ?1",
+                    params![
+                        id,
+                        format!("-{secs_ago} seconds"),
+                        if archived { "archived" } else { "active" }
+                    ],
+                )
+                .unwrap();
+            id
+        };
+
+        // Active thread chat.1: two notes, B newer than A.
+        insert("A first", Some("chat.1"), "working", 10, false);
+        insert("B second", Some("chat.1"), "working", 1, false);
+        // Noise that must be excluded:
+        insert("other thread", Some("chat.2"), "working", 0, false); // different context
+        insert("knowledge fact", None, "reality", 0, false); // NULL context
+        insert("archived note", Some("chat.1"), "working", 0, true); // archived, same ctx
+
+        let out = repo
+            .recent_in_context(&t, &["working".to_string()], "chat.1", 10)
+            .unwrap();
+
+        let facts: Vec<&str> = out.iter().map(|r| r.fact.as_str()).collect();
+        assert_eq!(
+            facts,
+            vec!["B second", "A first"],
+            "only chat.1 active working notes, newest first"
+        );
+    }
+
+    /// `recent_in_context` respects the limit and an empty ccl filter matches any
+    /// layer within the context.
+    #[test]
+    fn test_recent_in_context_limit_and_any_ccl() {
+        let repo = setup_concrete();
+        let t = TenantId("t".into());
+
+        for i in 0..5 {
+            let mut n = active_node(&t, &format!("note {i}"), 1.0);
+            n.ccl = "working".into();
+            n.context_key = Some("chat.1".into());
+            let id = repo.store_node(&n, &[0.1; 4]).unwrap();
+            repo.conn
+                .execute(
+                    "UPDATE nodes SET last_accessed_at = datetime('now', ?2) WHERE id = ?1",
+                    params![id, format!("-{i} seconds")],
+                )
+                .unwrap();
+        }
+
+        // Empty ccl filter → any layer; limit caps the result.
+        let out = repo.recent_in_context(&t, &[], "chat.1", 3).unwrap();
+        assert_eq!(out.len(), 3, "limit respected");
+        assert_eq!(out[0].fact, "note 0", "newest first");
+    }
+
+    /// Reads reinforce a `working` note exactly as they do facts: a boost resets
+    /// a decayed situational note to active/1.0, keeping an in-use session hot
+    /// between sweeps.
+    #[test]
+    fn test_boost_keeps_working_note_alive() {
+        let repo = setup_concrete();
+        let t = TenantId("t".into());
+
+        let mut note = active_node(&t, "found report = doc_1", 0.2);
+        note.ccl = "working".into();
+        note.context_key = Some("chat.jid:1".into());
+        let id = repo.store_node(&note, &[0.1; 4]).unwrap();
+
+        repo.boost_relevance(&[id]).unwrap();
+
+        let (score, status) = score_status(&repo, id);
+        assert!(
+            (score - 1.0).abs() < 1e-9,
+            "boost reinforces the working note"
+        );
+        assert_eq!(status, "active");
     }
 
     /// Reading a node (boost) resets its relevance score to 1.0 — querying is

@@ -41,6 +41,20 @@ impl RetrievalService {
         Ok(results)
     }
 
+    /// Recency backbone for the working-memory map (STM-WORKING-MEMORY slice 3):
+    /// the most-recent situational notes in one context, newest first. Passive —
+    /// no embedding, no boost.
+    pub fn recent_in_context(
+        &self,
+        tenant_id: &TenantId,
+        ccl_filter: &[String],
+        context_key: &str,
+        limit: usize,
+    ) -> Result<Vec<MemoryResult>> {
+        self.memory_repo
+            .recent_in_context(tenant_id, ccl_filter, context_key, limit)
+    }
+
     /// Legacy: simple hybrid search without graph traversal (for backward compatibility)
     pub async fn query_simple(
         &self,

@@ -1,5 +1,28 @@
 use rusqlite::Connection;
 
+/// Add a column to an existing table only if it is not already present.
+/// Idempotent, so it is safe to run on every startup: fresh stores already
+/// carry the column from their `CREATE TABLE`, pre-existing stores get it once.
+/// `col_def` is the SQL type/constraints (e.g. `"TEXT"`).
+fn add_column_if_missing(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    col_def: &str,
+) -> rusqlite::Result<()> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let existing: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<_, _>>()?;
+    if !existing.iter().any(|c| c == column) {
+        conn.execute(
+            &format!("ALTER TABLE {table} ADD COLUMN {column} {col_def}"),
+            [],
+        )?;
+    }
+    Ok(())
+}
+
 /// Initialize the database schema for NeuroLithe memory service.
 /// This creates the required `episodes`, `nodes`, and `edges` tables if they don't exist.
 pub fn init_schema(conn: &Connection, vector_dimension: usize) -> rusqlite::Result<()> {
@@ -40,11 +63,24 @@ pub fn init_schema(conn: &Connection, vector_dimension: usize) -> rusqlite::Resu
             is_explicit BOOLEAN DEFAULT 0,
             support_count INTEGER DEFAULT 1,
             relevance_score REAL DEFAULT 1.0,
+            context_key TEXT,
             last_accessed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(source_episode_id) REFERENCES episodes(id)
         )",
+        [],
+    )?;
+
+    // 2b. Working-memory migration: pre-existing stores created before the
+    // `context_key` column need it added (the CREATE above only applies to
+    // fresh DBs). Idempotent — guarded on `pragma_table_info`. The index backs
+    // the recency read (`recent_in_context`, slice 3): newest active notes in a
+    // given tenant/layer/context.
+    add_column_if_missing(conn, "nodes", "context_key", "TEXT")?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_nodes_context_recency
+             ON nodes(tenant_id, ccl, context_key, last_accessed_at DESC)",
         [],
     )?;
 
@@ -249,5 +285,81 @@ mod tests {
         assert!(table_names.contains(&"ccl_registry".to_string()));
         assert!(table_names.contains(&"vec_nodes".to_string()));
         assert!(table_names.contains(&"fts_nodes".to_string()));
+    }
+
+    /// The `context_key` column must exist after init and the whole schema must
+    /// be safe to run twice (idempotent migration).
+    #[test]
+    fn test_context_key_column_present_and_idempotent() {
+        let conn = init_db(None as Option<&String>).expect("Failed to open DB");
+        init_schema(&conn, 1536).expect("first init");
+        // Running the full schema again must not error (ALTER guarded).
+        init_schema(&conn, 1536).expect("second init should be idempotent");
+
+        let cols: Vec<String> = conn
+            .prepare("PRAGMA table_info(nodes)")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(
+            cols.iter().any(|c| c == "context_key"),
+            "nodes must carry context_key"
+        );
+    }
+
+    /// A store created *before* the working-memory feature (nodes table with no
+    /// `context_key`) must be migrated in place by `init_schema` — the column is
+    /// added without dropping data.
+    #[test]
+    fn test_migrates_preexisting_store() {
+        let conn = init_db(None as Option<&String>).expect("Failed to open DB");
+        // Simulate an old store: a `nodes` table lacking `context_key`.
+        conn.execute(
+            "CREATE TABLE nodes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tenant_id TEXT NOT NULL,
+                source_episode_id INTEGER,
+                payload JSON NOT NULL,
+                status TEXT DEFAULT 'active',
+                ccl TEXT DEFAULT 'reality',
+                is_explicit BOOLEAN DEFAULT 0,
+                support_count INTEGER DEFAULT 1,
+                relevance_score REAL DEFAULT 1.0,
+                last_accessed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO nodes (tenant_id, payload) VALUES ('t', '{}')",
+            [],
+        )
+        .unwrap();
+
+        // Running the current schema migrates the existing table.
+        init_schema(&conn, 1536).expect("migration on pre-existing store");
+
+        let cols: Vec<String> = conn
+            .prepare("PRAGMA table_info(nodes)")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(cols.iter().any(|c| c == "context_key"));
+
+        // Pre-existing row survives and reads back NULL for the new column.
+        let ck: Option<String> = conn
+            .query_row(
+                "SELECT context_key FROM nodes WHERE tenant_id = 't'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(ck, None);
     }
 }

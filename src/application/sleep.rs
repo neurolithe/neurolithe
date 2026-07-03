@@ -15,12 +15,16 @@ impl SleepWorker {
     pub fn new(
         memory_repo: Arc<dyn MemoryRepository>,
         llm_client: Arc<dyn LlmClient>,
-        half_life_days: f64,
+        default_half_life_days: f64,
+        working_half_life_days: f64,
     ) -> Self {
         Self {
             memory_repo,
             llm_client,
-            decay_engine: DecayEngine::new(half_life_days),
+            decay_engine: DecayEngine::with_half_lives(
+                default_half_life_days,
+                working_half_life_days,
+            ),
             conflict_resolver: ConflictResolver::new(),
         }
     }
@@ -95,6 +99,7 @@ impl SleepWorker {
                         is_explicit: false,
                         support_count: 1,
                         relevance_score: 1.0,
+                        context_key: None,
                     };
                     self.memory_repo.store_node(&node, &embedding)?
                 }
@@ -128,6 +133,7 @@ impl SleepWorker {
                             is_explicit: false,
                             support_count: 1,
                             relevance_score: 1.0,
+                            context_key: None,
                         };
                         self.memory_repo
                             .store_node(&target_node, &target_embedding)?

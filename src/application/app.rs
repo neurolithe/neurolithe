@@ -22,13 +22,19 @@ impl NeurolitheApp {
     pub fn new(
         memory_repo: Arc<dyn MemoryRepository>,
         llm_client: Arc<dyn LlmClient>,
-        half_life_days: f64,
+        default_half_life_days: f64,
+        working_half_life_days: f64,
     ) -> Self {
         Self {
             memory_repo: memory_repo.clone(),
             llm_client: llm_client.clone(),
             retrieval_service: RetrievalService::new(llm_client.clone(), memory_repo.clone()),
-            sleep_worker: SleepWorker::new(memory_repo.clone(), llm_client.clone(), half_life_days),
+            sleep_worker: SleepWorker::new(
+                memory_repo.clone(),
+                llm_client.clone(),
+                default_half_life_days,
+                working_half_life_days,
+            ),
             session_manager: SessionManager::new(
                 memory_repo.clone(),
                 llm_client.clone(),
@@ -140,6 +146,7 @@ impl NeurolitheApp {
             is_explicit: true,
             support_count: 1,
             relevance_score: 1.0,
+            context_key: None,
         };
 
         self.memory_repo.store_node(&node, &embedding)?;

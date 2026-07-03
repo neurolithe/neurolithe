@@ -133,6 +133,7 @@ impl QueryConsumer {
             k: q.k,
             time_filter: q.time_filter.clone().unwrap_or_default(),
             ccl: q.ccl.clone(),
+            context_key: q.context_key.clone(),
         };
         match self.query_service.execute(&req).await {
             Ok(outcome) => to_reply(&q.correlation_id, outcome),
@@ -314,6 +315,7 @@ mod tests {
             is_explicit: true,
             support_count: 1,
             relevance_score: 1.0,
+            context_key: None,
         };
         stm.store_node(&node, &[0.1_f32; DIM]).unwrap();
     }
@@ -365,6 +367,102 @@ mod tests {
             .await;
         assert_eq!(other.status, ReplyStatus::Empty);
         assert!(other.stm.is_empty());
+    }
+
+    /// Seed a working-memory note under a context key (bypassing the LLM).
+    fn seed_working_note(stm: &SqliteMemoryRepository, tenant: &str, fact: &str, context: &str) {
+        let node = MemoryNode {
+            id: None,
+            tenant_id: TenantId(tenant.into()),
+            source_episode_id: None,
+            payload: serde_json::json!({ "fact": fact, "tags": [] }),
+            status: "active".into(),
+            ccl: "working".into(),
+            is_explicit: true,
+            support_count: 1,
+            relevance_score: 1.0,
+            context_key: Some(context.into()),
+        };
+        stm.store_node(&node, &[0.1_f32; DIM]).unwrap();
+    }
+
+    /// Build an `stm_map` request with a context key and no query text.
+    fn stm_map_query(context: &str) -> MemoryQuery {
+        serde_json::from_value(serde_json::json!({
+            "correlationId": "c1",
+            "scope": "stm_map",
+            "contextKey": context,
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn stm_map_recency_backbone_does_zero_embeds() {
+        let f = fixture(false);
+        seed_working_note(&f.stm, "jarvis", "found report = doc_42", "chat.1");
+        seed_working_note(&f.stm, "jarvis", "other-thread note", "chat.2");
+
+        let reply = f.consumer.respond(&stm_map_query("chat.1")).await;
+
+        // Only the chat.1 note; carries its context key; no embedding hop at all.
+        assert_eq!(reply.stm.len(), 1);
+        assert!(reply.stm[0].fact.contains("doc_42"));
+        assert_eq!(reply.stm[0].context_key.as_deref(), Some("chat.1"));
+        assert_eq!(f.llm.embed_count(), 0, "recency backbone must not embed");
+    }
+
+    #[tokio::test]
+    async fn stm_map_appends_semantic_after_recency_deduped() {
+        let f = fixture(false);
+        // Backbone note in the active thread, plus a durable fact — both mention
+        // "inspection" so the semantic pass matches both.
+        seed_working_note(&f.stm, "jarvis", "inspection report = doc_42", "chat.1");
+        seed_stm_fact(&f.stm, "jarvis", "inspection checklist tips");
+
+        let with_query: MemoryQuery = serde_json::from_value(serde_json::json!({
+            "correlationId": "c1",
+            "scope": "stm_map",
+            "contextKey": "chat.1",
+            "query": "inspection",
+        }))
+        .unwrap();
+        let reply = f.consumer.respond(&with_query).await;
+
+        // Backbone (working note) first, then the deduped semantic extra.
+        assert_eq!(reply.stm[0].fact, "inspection report = doc_42");
+        assert_eq!(reply.stm[0].context_key.as_deref(), Some("chat.1"));
+        let facts: Vec<&str> = reply.stm.iter().map(|e| e.fact.as_str()).collect();
+        assert!(
+            facts.contains(&"inspection checklist tips"),
+            "semantic extra appended"
+        );
+        // The backbone note appears exactly once (deduped, not duplicated).
+        assert_eq!(
+            facts
+                .iter()
+                .filter(|f| **f == "inspection report = doc_42")
+                .count(),
+            1
+        );
+        assert!(f.llm.embed_count() >= 1, "enrichment embeds the query once");
+    }
+
+    #[tokio::test]
+    async fn stm_map_without_context_degrades_to_semantic_only() {
+        let f = fixture(false);
+        seed_stm_fact(&f.stm, "jarvis", "inspection checklist tips");
+
+        // No contextKey, but a query → backbone empty, semantic still runs.
+        let no_ctx: MemoryQuery = serde_json::from_value(serde_json::json!({
+            "correlationId": "c1",
+            "scope": "stm_map",
+            "query": "inspection",
+        }))
+        .unwrap();
+        let reply = f.consumer.respond(&no_ctx).await;
+
+        let facts: Vec<&str> = reply.stm.iter().map(|e| e.fact.as_str()).collect();
+        assert!(facts.contains(&"inspection checklist tips"));
     }
 
     #[tokio::test]

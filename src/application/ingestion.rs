@@ -162,6 +162,7 @@ impl IngestionService {
                 is_explicit: true,
                 support_count: 1,
                 relevance_score: 1.0,
+                context_key: None,
             };
             self.stm.store_node(&node, &distillate.embedding)?;
         }

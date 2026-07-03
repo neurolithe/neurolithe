@@ -1,5 +1,13 @@
 use serde::{Deserialize, Serialize};
 
+/// The default cognitive layer for knowledge facts (documents, extracted facts).
+pub const REALITY_CCL: &str = "reality";
+
+/// The working-memory layer: short-lived situational notes the agent leaves for
+/// itself (STM-WORKING-MEMORY). Decays on a much shorter half-life than
+/// `reality` so stale session context fades fast (see [`crate::domain::decay`]).
+pub const WORKING_CCL: &str = "working";
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TenantId(pub String);
 
@@ -37,6 +45,13 @@ pub struct MemoryNode {
     pub is_explicit: bool,
     pub support_count: i32,
     pub relevance_score: f64,
+
+    /// Working-memory context key (the *who/where* axis, orthogonal to `ccl`).
+    /// Set only on situational notes so recency orientation can be scoped to one
+    /// active thread/run-chain (STM-WORKING-MEMORY §5a). Knowledge-path writes
+    /// (feeder, sleep pipeline, direct `store_memory`) leave it `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_key: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -64,6 +79,11 @@ pub struct MemoryResult {
     pub ccl: String,
     pub last_updated: String,
     pub connections: Vec<MemoryConnection>,
+    /// Working-memory context key, populated only by the recency read
+    /// (`recent_in_context`); `None` on ordinary knowledge retrieval. Lets the
+    /// bus reply tell the agent which thread a situational note belongs to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_key: Option<String>,
 }
 
 /// A 1-hop connection returned in query results
@@ -93,6 +113,7 @@ mod tests {
             is_explicit: true,
             support_count: 1,
             relevance_score: 1.0,
+            context_key: None,
         };
 
         let serialized = serde_json::to_string(&node).unwrap();

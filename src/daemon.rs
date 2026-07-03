@@ -112,7 +112,12 @@ pub async fn run(config: AppConfig) -> Result<()> {
     ));
 
     // --- services ---
-    let app = Arc::new(NeurolitheApp::new(stm_repo.clone(), llm.clone(), 7.0));
+    let app = Arc::new(NeurolitheApp::new(
+        stm_repo.clone(),
+        llm.clone(),
+        config.decay.default_half_life_days,
+        config.decay.working_half_life_days(),
+    ));
     let introspection = Arc::new(IntrospectionService::new(
         stm_repo.clone(),
         ltm_repo.clone(),
@@ -254,7 +259,12 @@ pub async fn run_mcp(config: AppConfig) -> Result<()> {
         resolve_api_key(&config.llm.provider),
         resolve_api_key(config.llm.effective_embedding_provider()),
     );
-    let app = Arc::new(NeurolitheApp::new(stm_repo.clone(), llm, 7.0));
+    let app = Arc::new(NeurolitheApp::new(
+        stm_repo.clone(),
+        llm,
+        config.decay.default_half_life_days,
+        config.decay.working_half_life_days(),
+    ));
     let introspection = Arc::new(IntrospectionService::new(stm_repo, ltm_repo));
 
     McpServer::new(app, introspection).run_stdio().await

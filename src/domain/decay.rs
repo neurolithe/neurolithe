@@ -1,24 +1,68 @@
-use crate::domain::models::MemoryNode;
+use crate::domain::models::{MemoryNode, WORKING_CCL};
 
+/// The forgetting curve for STM. Exponential half-life decay, resolved *per
+/// cognitive layer* (STM-WORKING-MEMORY slice 2): the `working` layer
+/// (situational notes) fades on a much shorter half-life than the default fact
+/// store, so short-term session context clears fast while durable facts persist.
+/// LTM is never touched by this engine.
 pub struct DecayEngine {
-    pub half_life_days: f64,
+    /// Half-life (days) for every layer except `working` — the durable fact
+    /// store (`reality`, `dream`, `simulation`, …).
+    pub default_half_life_days: f64,
+    /// Half-life (days) for the `working` layer. Typically far smaller than the
+    /// default (minutes–hours vs. days).
+    pub working_half_life_days: f64,
 }
 
 impl DecayEngine {
+    /// Single half-life for every layer (the historical behaviour — `working`
+    /// notes decay at the same rate as facts). Kept for callers/tests that don't
+    /// care about the working regime.
     pub fn new(half_life_days: f64) -> Self {
-        Self { half_life_days }
+        Self {
+            default_half_life_days: half_life_days,
+            working_half_life_days: half_life_days,
+        }
     }
 
-    /// Calculate the decayed relevance score
+    /// Distinct half-lives for the default fact store vs. the `working` layer.
+    pub fn with_half_lives(default_half_life_days: f64, working_half_life_days: f64) -> Self {
+        Self {
+            default_half_life_days,
+            working_half_life_days,
+        }
+    }
+
+    /// Resolve the half-life (days) that applies to a given CCL.
+    pub fn half_life_for(&self, ccl: &str) -> f64 {
+        if ccl == WORKING_CCL {
+            self.working_half_life_days
+        } else {
+            self.default_half_life_days
+        }
+    }
+
+    /// Decay a score over `days_elapsed` using the **default** half-life.
+    /// Retained for back-compat; prefer [`Self::calculate_decay_for`] when the
+    /// node's CCL is known.
     pub fn calculate_decay(&self, current_score: f64, days_elapsed: f64) -> f64 {
-        // formula: score = current_score * (0.5 ^ (days_elapsed / half_life))
-        current_score * 0.5f64.powf(days_elapsed / self.half_life_days)
+        self.decay(current_score, days_elapsed, self.default_half_life_days)
     }
 
-    /// Apply decay to a specific node, returning the modified node
-    /// If score drops below threshold (e.g. 0.1), status becomes 'archived'
+    /// Decay a score over `days_elapsed` using the half-life for `ccl`.
+    pub fn calculate_decay_for(&self, current_score: f64, days_elapsed: f64, ccl: &str) -> f64 {
+        self.decay(current_score, days_elapsed, self.half_life_for(ccl))
+    }
+
+    fn decay(&self, current_score: f64, days_elapsed: f64, half_life_days: f64) -> f64 {
+        // score = current_score * (0.5 ^ (days_elapsed / half_life))
+        current_score * 0.5f64.powf(days_elapsed / half_life_days)
+    }
+
+    /// Apply decay to a specific node using *its own* CCL's half-life, returning
+    /// the modified node. If the score drops below 0.1 the node is `archived`.
     pub fn apply_to_node(&self, mut node: MemoryNode, days_elapsed: f64) -> MemoryNode {
-        let new_score = self.calculate_decay(node.relevance_score, days_elapsed);
+        let new_score = self.calculate_decay_for(node.relevance_score, days_elapsed, &node.ccl);
         node.relevance_score = new_score;
 
         if new_score < 0.1 && node.status == "active" {
@@ -60,11 +104,46 @@ mod tests {
             is_explicit: false,
             support_count: 1,
             relevance_score: 0.15,
+            context_key: None,
         };
 
         // 7 days later, 0.15 becomes 0.075, which is < 0.1
         let decayed = engine.apply_to_node(node, 7.0);
         assert_eq!(decayed.status, "archived");
         assert!(decayed.relevance_score < 0.1);
+    }
+
+    /// The core of slice 2: at the *same age*, a `working` note decays below the
+    /// 0.1 archive threshold while a `reality` fact barely moves — because they
+    /// resolve to different half-lives.
+    #[test]
+    fn test_working_layer_decays_far_faster_than_reality() {
+        // reality 7 days, working 30 minutes.
+        let engine = DecayEngine::with_half_lives(7.0, 30.0 / 1440.0);
+
+        // Two hours of inactivity.
+        let two_hours_days = 2.0 / 24.0;
+
+        let working = engine.calculate_decay_for(1.0, two_hours_days, WORKING_CCL);
+        let reality = engine.calculate_decay_for(1.0, two_hours_days, "reality");
+
+        assert!(
+            working < 0.1,
+            "a working note should be archivable after hours, got {working}"
+        );
+        assert!(
+            reality > 0.9,
+            "a reality fact should barely decay over hours, got {reality}"
+        );
+    }
+
+    /// `half_life_for` routes `working` to the working curve and everything else
+    /// (including unknown layers) to the default.
+    #[test]
+    fn test_half_life_resolution_by_ccl() {
+        let engine = DecayEngine::with_half_lives(7.0, 0.5);
+        assert_eq!(engine.half_life_for(WORKING_CCL), 0.5);
+        assert_eq!(engine.half_life_for("reality"), 7.0);
+        assert_eq!(engine.half_life_for("dream"), 7.0);
     }
 }

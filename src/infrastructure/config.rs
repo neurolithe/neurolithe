@@ -19,6 +19,8 @@ pub struct AppConfig {
     pub feeder: FeederConfig,
     #[serde(default)]
     pub bus_query: BusQueryConfig,
+    #[serde(default)]
+    pub decay: DecayConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -138,6 +140,35 @@ impl Default for BusQueryConfig {
     }
 }
 
+/// Per-layer STM decay half-lives (STM-WORKING-MEMORY slice 2). The `working`
+/// layer (situational notes) is expressed in **minutes** because it is meant to
+/// fade on a session timescale, while durable facts use the multi-day default.
+#[derive(Debug, Deserialize, Clone)]
+pub struct DecayConfig {
+    /// Half-life (days) for every layer except `working`.
+    pub default_half_life_days: f64,
+    /// Half-life (minutes) for the `working` layer. Placeholder default 30 min —
+    /// tunable against real sessions (STM-WORKING-MEMORY open item).
+    pub working_half_life_minutes: f64,
+}
+
+impl Default for DecayConfig {
+    fn default() -> Self {
+        Self {
+            default_half_life_days: 7.0,
+            working_half_life_minutes: 30.0,
+        }
+    }
+}
+
+impl DecayConfig {
+    /// The `working` half-life converted to days (the unit the `DecayEngine`
+    /// works in). 1440 minutes = 1 day.
+    pub fn working_half_life_days(&self) -> f64 {
+        self.working_half_life_minutes / 1440.0
+    }
+}
+
 impl AppConfig {
     pub fn load() -> anyhow::Result<Self> {
         // Load .env file if it exists
@@ -171,7 +202,10 @@ impl AppConfig {
             .set_default("sweep.interval_secs", 86_400_i64)?
             .set_default("metrics.interval_secs", 60_i64)?
             .set_default("feeder.enabled", true)?
-            .set_default("bus_query.enabled", true)?;
+            .set_default("bus_query.enabled", true)?
+            // Per-layer decay: durable facts 7-day, working notes 30-minute.
+            .set_default("decay.default_half_life_days", 7.0)?
+            .set_default("decay.working_half_life_minutes", 30.0)?;
 
         // If neurolithe.toml exists, load it
         if include_file && std::path::Path::new("neurolithe.toml").exists() {
@@ -216,6 +250,10 @@ mod tests {
         assert_eq!(cfg.metrics.interval_secs, 60);
         assert!(cfg.feeder.enabled);
         assert!(cfg.bus_query.enabled);
+        // Per-layer decay defaults.
+        assert_eq!(cfg.decay.default_half_life_days, 7.0);
+        assert_eq!(cfg.decay.working_half_life_minutes, 30.0);
+        assert!((cfg.decay.working_half_life_days() - 30.0 / 1440.0).abs() < 1e-12);
         // STM and LTM dimensions are independent — changing one never implies
         // the other.
         assert_ne!(cfg.stm.vector_dimension, cfg.ltm.vector_dimension);
@@ -225,6 +263,7 @@ mod tests {
         unsafe {
             std::env::set_var("NEUROLITHE__LTM__VECTOR_DIMENSION", "1024");
             std::env::set_var("NEUROLITHE__FEEDER__ENABLED", "false");
+            std::env::set_var("NEUROLITHE__DECAY__WORKING_HALF_LIFE_MINUTES", "5");
         }
 
         let cfg = AppConfig::build(false).expect("config should load with env overrides");
@@ -233,10 +272,13 @@ mod tests {
         assert_eq!(cfg.ltm.vector_dimension, 1024);
         assert_eq!(cfg.stm.vector_dimension, 1536);
         assert!(!cfg.feeder.enabled);
+        // Decay working half-life overridden via env.
+        assert_eq!(cfg.decay.working_half_life_minutes, 5.0);
 
         unsafe {
             std::env::remove_var("NEUROLITHE__LTM__VECTOR_DIMENSION");
             std::env::remove_var("NEUROLITHE__FEEDER__ENABLED");
+            std::env::remove_var("NEUROLITHE__DECAY__WORKING_HALF_LIFE_MINUTES");
         }
     }
 }

@@ -41,6 +41,21 @@ pub trait MemoryRepository {
         limit: usize,
     ) -> Result<Vec<MemoryResult>>;
 
+    /// Recency-ordered working-memory read (STM-WORKING-MEMORY slice 3): the
+    /// most-recently-touched **active** notes in one tenant + `context_key`,
+    /// newest first. No embedding hop — the cheap, always-works backbone of
+    /// RECALL. Scoped to `context_key`, so NULL-context knowledge facts and
+    /// other contexts/threads are excluded; `ccl_filter` narrows further (empty
+    /// = any layer). Does **not** boost — orientation is passive; only facts the
+    /// agent actually uses get reinforced.
+    fn recent_in_context(
+        &self,
+        tenant_id: &TenantId,
+        ccl_filter: &[String],
+        context_key: &str,
+        limit: usize,
+    ) -> Result<Vec<MemoryResult>>;
+
     /// Boost relevance score back to 1.0 on read (blueprint: reading resets decay)
     fn boost_relevance(&self, node_ids: &[i64]) -> Result<()>;
 
