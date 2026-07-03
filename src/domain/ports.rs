@@ -59,6 +59,16 @@ pub trait MemoryRepository {
     /// Boost relevance score back to 1.0 on read (blueprint: reading resets decay)
     fn boost_relevance(&self, node_ids: &[i64]) -> Result<()>;
 
+    /// Find an existing active `working` **subject** node for a `dataId` in one
+    /// tenant + thread (STM-GRAPH): a graph anchor reused across the session's
+    /// turns so they connect through it. `None` if none exists yet.
+    fn find_working_subject(
+        &self,
+        tenant_id: &TenantId,
+        context_key: &str,
+        data_id: &str,
+    ) -> Result<Option<i64>>;
+
     /// Find nodes semantically similar to the given embedding (for conflict resolution)
     fn find_similar_nodes(
         &self,

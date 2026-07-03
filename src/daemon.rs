@@ -142,6 +142,7 @@ pub async fn run(config: AppConfig) -> Result<()> {
         ltm_repo.clone(),
         ingestion.clone(),
         llm.clone(),
+        config.stm.vector_dimension,
     ));
     let feeder_stats = Arc::new(FeederStats::default());
 
