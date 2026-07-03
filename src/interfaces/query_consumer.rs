@@ -412,12 +412,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stm_map_appends_semantic_working_notes_but_not_reality() {
+    async fn stm_map_is_pure_context_recency_no_vector_no_leaks() {
         let f = fixture(false);
-        // Backbone note in the active thread; a working note in ANOTHER thread
-        // (shared awareness, surfaced by enrichment); and a reality knowledge
-        // fact that must NEVER enter the situational map — all mention
-        // "inspection" so the semantic pass would match each by keyword.
+        // This thread's note; ANOTHER thread's working note; and a reality fact
+        // — all mention "inspection" so a vector/keyword pass WOULD match each.
         seed_working_note(&f.stm, "jarvis", "inspection report = doc_42", "chat.1");
         seed_working_note(
             &f.stm,
@@ -427,6 +425,8 @@ mod tests {
         );
         seed_stm_fact(&f.stm, "jarvis", "inspection checklist tips"); // reality
 
+        // Even WITH a query, the map is pure recency in-thread: the query is not
+        // used for retrieval (no embedding, no cross-context, no reality).
         let with_query: MemoryQuery = serde_json::from_value(serde_json::json!({
             "correlationId": "c1",
             "scope": "stm_map",
@@ -436,39 +436,28 @@ mod tests {
         .unwrap();
         let reply = f.consumer.respond(&with_query).await;
 
-        // Backbone (this thread's working note) first.
-        assert_eq!(reply.stm[0].fact, "inspection report = doc_42");
-        assert_eq!(reply.stm[0].context_key.as_deref(), Some("chat.1"));
         let facts: Vec<&str> = reply.stm.iter().map(|e| e.fact.as_str()).collect();
-        // A working note from another thread IS surfaced (shared awareness)…
-        assert!(
-            facts.contains(&"inspection follow-up from chat 2"),
-            "cross-thread working note appended as enrichment"
-        );
-        // …but the reality knowledge fact is NOT (would mislead follow-ups).
-        assert!(
-            !facts.contains(&"inspection checklist tips"),
-            "reality knowledge must not enter the situational map"
-        );
-        // Backbone deduped — appears exactly once.
         assert_eq!(
-            facts
-                .iter()
-                .filter(|f| **f == "inspection report = doc_42")
-                .count(),
-            1
+            facts,
+            vec!["inspection report = doc_42"],
+            "only this thread's notes"
         );
-        assert!(f.llm.embed_count() >= 1, "enrichment embeds the query once");
+        assert_eq!(reply.stm[0].context_key.as_deref(), Some("chat.1"));
+        assert_eq!(
+            f.llm.embed_count(),
+            0,
+            "the situational map never runs a vector search"
+        );
     }
 
     #[tokio::test]
-    async fn stm_map_without_context_degrades_to_semantic_working_only() {
+    async fn stm_map_without_context_is_empty() {
         let f = fixture(false);
-        // A working note (some other thread) matches; a reality fact does not.
-        seed_working_note(&f.stm, "jarvis", "inspection note from a thread", "chat.9");
-        seed_stm_fact(&f.stm, "jarvis", "inspection checklist tips"); // reality, excluded
+        seed_working_note(&f.stm, "jarvis", "some working note", "chat.9");
+        seed_stm_fact(&f.stm, "jarvis", "inspection checklist tips");
 
-        // No contextKey, but a query → backbone empty, semantic still runs.
+        // No contextKey → no thread to orient by → empty (never a global
+        // similarity search).
         let no_ctx: MemoryQuery = serde_json::from_value(serde_json::json!({
             "correlationId": "c1",
             "scope": "stm_map",
@@ -477,15 +466,9 @@ mod tests {
         .unwrap();
         let reply = f.consumer.respond(&no_ctx).await;
 
-        let facts: Vec<&str> = reply.stm.iter().map(|e| e.fact.as_str()).collect();
-        assert!(
-            facts.contains(&"inspection note from a thread"),
-            "working note surfaced by semantic-only fallback"
-        );
-        assert!(
-            !facts.contains(&"inspection checklist tips"),
-            "reality knowledge stays out of the situational map"
-        );
+        assert_eq!(reply.status, ReplyStatus::Empty);
+        assert!(reply.stm.is_empty());
+        assert_eq!(f.llm.embed_count(), 0);
     }
 
     #[tokio::test]
