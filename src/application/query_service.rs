@@ -128,24 +128,58 @@ impl QueryService {
         }
     }
 
-    /// Working-memory map (STM-WORKING-MEMORY §5): recency-first situational
-    /// notes for the request's `context_key`. The backbone is the passive
-    /// recency read (no embedding); semantic enrichment is layered on in slice
-    /// 5. With no `context_key` there is no thread to orient by, so the map is
-    /// empty (the caller still gets a valid, empty reply).
+    /// Working-memory map (STM-WORKING-MEMORY §5): **recency-first, semantics as
+    /// enrichment.**
+    ///
+    /// 1. Backbone — the passive recency read for the request's `context_key`
+    ///    (no embedding hop). This is what resolves information-poor follow-ups
+    ///    ("what's *its* id?").
+    /// 2. Enrichment — *only if* the request carries query text, one hybrid
+    ///    search (over `working` + `reality`) whose hits are appended **after**
+    ///    the backbone, deduped by fact text. Recency always comes first.
+    ///
+    /// With no `context_key` the backbone is empty; the map degrades gracefully
+    /// to semantic-only (when a query is present) or an empty map. **No LLM /
+    /// embedding call is made when `query` is absent.**
     async fn stm_map(&self, req: &QueryRequest) -> Result<Vec<MemoryResult>> {
-        let Some(context_key) = req.context_key.as_deref() else {
-            return Ok(Vec::new());
-        };
         let tenant = TenantId(req.tenant.clone());
-        // `stm_map` defaults to the working layer; an explicit ccl overrides.
-        let ccl_filter: Vec<String> = if req.ccl.is_empty() {
-            vec![WORKING_CCL.to_string()]
+
+        // (1) Recency backbone — requires a thread to orient by.
+        let mut results: Vec<MemoryResult> = if let Some(context_key) = req.context_key.as_deref() {
+            // `stm_map` defaults to the working layer; an explicit ccl overrides.
+            let ccl_filter: Vec<String> = if req.ccl.is_empty() {
+                vec![WORKING_CCL.to_string()]
+            } else {
+                req.ccl.clone()
+            };
+            self.retrieval
+                .recent_in_context(&tenant, &ccl_filter, context_key, req.k)?
         } else {
-            req.ccl.clone()
+            Vec::new()
         };
-        self.retrieval
-            .recent_in_context(&tenant, &ccl_filter, context_key, req.k)
+
+        // (2) Semantic enrichment — only when the request carries query text.
+        let query = req.query.trim();
+        if !query.is_empty() {
+            // Search both the working notes and durable facts so enrichment can
+            // surface related knowledge, not just other situational notes.
+            let enrich_ccl = vec![WORKING_CCL.to_string(), DEFAULT_CCL.to_string()];
+            let mut semantic = self
+                .retrieval
+                .query(&tenant, query, &req.time_filter, &enrich_ccl)
+                .await?;
+            semantic.truncate(req.k);
+
+            let seen: std::collections::HashSet<String> =
+                results.iter().map(|r| r.fact.clone()).collect();
+            for m in semantic {
+                if !seen.contains(&m.fact) {
+                    results.push(m);
+                }
+            }
+        }
+
+        Ok(results)
     }
 
     /// STM hybrid search, truncated to the requested breadth `k`. An empty CCL
