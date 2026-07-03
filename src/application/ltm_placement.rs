@@ -25,8 +25,9 @@ pub struct DocumentToPlace {
     pub name: String,
     /// Distilled summary (becomes the leaf's summary + roll-up input).
     pub summary: String,
-    /// Embedding of the summary (LTM dimension), used to locate the best
-    /// concept. Leaves are not vector-indexed in V2, so this is not stored.
+    /// Embedding of the summary (LTM dimension). Used both to locate the best
+    /// concept (placement) and — stored on the leaf — to make the document
+    /// recallable by meaning.
     pub embedding: Vec<f32>,
     /// Archive reference (Ledger/Pithos `dataId`).
     pub data_id: String,
@@ -80,14 +81,16 @@ impl LtmPlacement {
             }
         };
 
-        // 2. Create the leaf node and its dataId link. Leaves are NOT
-        //    vector-indexed in V2: only concept nodes live in `vec_ltm`, so a
-        //    new document's nearest-vector match is always a concept (a leaf
-        //    can't crowd out a real match and misroute the doc to the inbox).
-        //    Leaves are reached by tree navigation/drill, not vector entry.
+        // 2. Create the leaf node and its dataId link. The leaf IS vector-indexed
+        //    (its summary embedding), so `recall` can land on the document
+        //    directly by meaning — essential while docs pile in the inbox before
+        //    the tree grows real concepts around them. This does NOT affect
+        //    placement: step 1 uses the concept-only `find_similar_concepts`, so
+        //    an embedded leaf can never crowd out a concept match and misroute a
+        //    new document to the inbox.
         let leaf_node_id = self.repo.create_node(
             &TreeNode::new(doc.name.clone(), doc.summary.clone(), TreeNodeKind::Leaf),
-            None,
+            Some(&doc.embedding),
         )?;
         self.repo.create_leaf(&Leaf {
             tree_node_id: leaf_node_id,

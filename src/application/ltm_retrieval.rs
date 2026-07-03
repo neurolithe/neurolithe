@@ -179,13 +179,16 @@ impl LtmRetrieval {
         }))
     }
 
-    /// Vector-locate the nearest concept to `embedding`, then assemble context
-    /// up (ancestors) and down (children + document leaves). `None` if the tree
-    /// has no concept nodes.
+    /// Vector-locate the nearest node to `embedding` — a concept **or** a
+    /// document leaf — then assemble context. A concept entry returns its
+    /// ancestors + children + child document leaves (the knowledge-tree view). A
+    /// leaf entry returns the document itself (its `dataId`/provenance) framed by
+    /// its ancestors, so a document is recallable by meaning even while it sits
+    /// under the inbox. `None` if nothing is vector-indexed yet.
     pub fn recall(&self, embedding: &[f32]) -> Result<Option<RecallResult>> {
         let Some((entry, distance)) = self
             .repo
-            .find_similar_concepts(embedding, RECALL_MAX_DISTANCE, 1)?
+            .find_similar_any(embedding, RECALL_MAX_DISTANCE, 1)?
             .into_iter()
             .next()
         else {
@@ -198,21 +201,38 @@ impl LtmRetrieval {
             .iter()
             .map(NodeView::from)
             .collect();
-        let children = self
-            .repo
-            .get_children(entry_id)?
-            .iter()
-            .map(NodeView::from)
-            .collect();
-        let leaves = self
-            .repo
-            .get_child_leaves(entry_id)?
-            .into_iter()
-            .map(|l| LeafRef {
-                data_id: l.data_id,
-                provenance: l.provenance,
-            })
-            .collect();
+
+        // A leaf hit surfaces the document directly; a concept hit surfaces its
+        // children + attached document leaves.
+        let (children, leaves) = if entry.kind == TreeNodeKind::Leaf {
+            let leaf = self
+                .repo
+                .get_leaf(entry_id)?
+                .map(|l| LeafRef {
+                    data_id: l.data_id,
+                    provenance: l.provenance,
+                })
+                .into_iter()
+                .collect();
+            (Vec::new(), leaf)
+        } else {
+            let children = self
+                .repo
+                .get_children(entry_id)?
+                .iter()
+                .map(NodeView::from)
+                .collect();
+            let leaves = self
+                .repo
+                .get_child_leaves(entry_id)?
+                .into_iter()
+                .map(|l| LeafRef {
+                    data_id: l.data_id,
+                    provenance: l.provenance,
+                })
+                .collect();
+            (children, leaves)
+        };
 
         Ok(Some(RecallResult {
             entry: NodeView::from(&entry),
@@ -403,5 +423,59 @@ mod tests {
         // Down: the document leaf is surfaced as a reference.
         assert_eq!(recalled.leaves.len(), 1);
         assert_eq!(recalled.leaves[0].data_id, "doc_metro");
+    }
+
+    /// A document leaf embedded nearer than any concept is recalled **directly**:
+    /// the entry is the leaf and it carries its own `dataId`. This is what makes
+    /// inbox documents reachable by meaning before the tree grows concepts.
+    #[test]
+    fn test_recall_returns_document_when_leaf_is_nearest() {
+        let conn = init_db(None as Option<&String>).unwrap();
+        init_ltm_schema(&conn, DIM).unwrap();
+        let repo = Arc::new(SqliteLtmRepository::new(conn));
+
+        // A concept off in one direction; a document leaf embedded in another.
+        let root = repo
+            .create_node(&TreeNode::new("Reza", "root", TreeNodeKind::Spine), None)
+            .unwrap();
+        let concept = repo
+            .create_node(
+                &TreeNode::new("job", "work", TreeNodeKind::Spine),
+                Some(&[1.0, 0.0, 0.0, 0.0]),
+            )
+            .unwrap();
+        repo.add_edge(&TreeEdge::new(root, concept)).unwrap();
+        let leaf = repo
+            .create_node(
+                &TreeNode::new("note", "a durable metis note", TreeNodeKind::Leaf),
+                Some(&[0.0, 1.0, 0.0, 0.0]),
+            )
+            .unwrap();
+        repo.create_leaf(&Leaf {
+            tree_node_id: leaf,
+            data_id: "note_1".into(),
+            provenance: Provenance {
+                source: "metis".into(),
+                ingested_at: None,
+                confidence: 1.0,
+            },
+        })
+        .unwrap();
+        repo.add_edge(&TreeEdge::new(root, leaf)).unwrap();
+
+        let ret = LtmRetrieval::new(repo as Arc<dyn LtmRepository>);
+        let recalled = ret
+            .recall(&[0.0, 1.0, 0.0, 0.0])
+            .unwrap()
+            .expect("the leaf is vector-indexed");
+
+        // Nearest node is the document leaf → entry is the leaf, carrying its dataId.
+        assert_eq!(recalled.entry.id, leaf);
+        assert_eq!(recalled.entry.kind, TreeNodeKind::Leaf);
+        assert_eq!(recalled.leaves.len(), 1);
+        assert_eq!(recalled.leaves[0].data_id, "note_1");
+        assert_eq!(recalled.leaves[0].provenance.source, "metis");
+        // Framed by its ancestor for context.
+        assert!(recalled.ancestors.iter().any(|n| n.id == root));
     }
 }

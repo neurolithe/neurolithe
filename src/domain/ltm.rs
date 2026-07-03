@@ -147,6 +147,21 @@ pub trait LtmRepository {
         limit: usize,
     ) -> Result<Vec<(TreeNode, f64)>>;
 
+    /// Nearest embedded nodes across concepts **and document leaves** (unlike
+    /// [`find_similar_concepts`](Self::find_similar_concepts), which is
+    /// concept-only for placement). Used by recall so a document is reachable by
+    /// meaning even while it sits under the inbox (before the tree grows real
+    /// concepts around it).
+    fn find_similar_any(
+        &self,
+        embedding: &[f32],
+        max_distance: f64,
+        limit: usize,
+    ) -> Result<Vec<(TreeNode, f64)>>;
+
+    /// The document leaf attached to a given tree node, if that node is a leaf.
+    fn get_leaf(&self, tree_node_id: i64) -> Result<Option<Leaf>>;
+
     /// The inbox holding node (the placement fallback), if seeded.
     fn get_inbox(&self) -> Result<Option<TreeNode>>;
 
