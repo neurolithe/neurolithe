@@ -100,6 +100,18 @@ pub fn init_schema(conn: &Connection, vector_dimension: usize) -> rusqlite::Resu
         ",
     )?;
 
+    // 6. Idempotency ledger for `memory.command` writes. A `commandId` is
+    // recorded after a remember/forget succeeds; a duplicate delivery is
+    // skipped. Old rows are swept periodically (the ids only guard against
+    // at-least-once redelivery, which is bounded in time).
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS processed_commands (
+            command_id TEXT PRIMARY KEY,
+            processed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )",
+        [],
+    )?;
+
     Ok(())
 }
 
@@ -159,7 +171,11 @@ pub fn init_ltm_schema(conn: &Connection, vector_dimension: usize) -> rusqlite::
         [],
     )?;
 
-    // 3. Vector index over node summary embeddings (sqlite-vec, LTM dimension).
+    // 3. Vector index over CONCEPT node embeddings (sqlite-vec, LTM dimension).
+    // Concepts and leaves live in separate indexes: placement searches concepts
+    // only, so a document's embedding can never crowd out a concept match (the
+    // vec0 `k` cut is applied before any kind filter — a shared index would let
+    // a near leaf displace the real concept and misroute the doc to the inbox).
     let vec_query = format!(
         "CREATE VIRTUAL TABLE IF NOT EXISTS vec_ltm USING vec0(
             node_id INTEGER PRIMARY KEY,
@@ -167,6 +183,16 @@ pub fn init_ltm_schema(conn: &Connection, vector_dimension: usize) -> rusqlite::
         )"
     );
     conn.execute(&vec_query, [])?;
+
+    // 3b. Vector index over DOCUMENT LEAF embeddings — so recall can land on a
+    // document directly by meaning (while it still sits under the inbox).
+    let vec_leaves_query = format!(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS vec_leaves USING vec0(
+            node_id INTEGER PRIMARY KEY,
+            embedding float[{vector_dimension}]
+        )"
+    );
+    conn.execute(&vec_leaves_query, [])?;
 
     // 4. FTS5 over node summaries (content table = tree_nodes).
     conn.execute(

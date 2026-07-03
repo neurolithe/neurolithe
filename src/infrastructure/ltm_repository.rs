@@ -95,6 +95,7 @@ impl LtmRepository for SqliteLtmRepository {
         // FK-safe order; deleting tree_nodes fires the fts_ltm delete trigger.
         tx.execute("DELETE FROM tree_edges", [])?;
         tx.execute("DELETE FROM vec_ltm", [])?;
+        tx.execute("DELETE FROM vec_leaves", [])?;
         tx.execute("DELETE FROM leaves", [])?;
         tx.execute("DELETE FROM tree_nodes", [])?;
         tx.commit()?;
@@ -116,8 +117,15 @@ impl LtmRepository for SqliteLtmRepository {
                     std::mem::size_of_val(embedding),
                 )
             };
+            // Concepts and document leaves live in separate vector indexes (see
+            // schema): placement searches concepts only, recall searches both.
+            let table = if node.kind == TreeNodeKind::Leaf {
+                "vec_leaves"
+            } else {
+                "vec_ltm"
+            };
             tx.execute(
-                "INSERT INTO vec_ltm(node_id, embedding) VALUES (?1, ?2)",
+                &format!("INSERT INTO {table}(node_id, embedding) VALUES (?1, ?2)"),
                 params![node_id, embedding_bytes],
             )?;
         }
@@ -241,6 +249,71 @@ impl LtmRepository for SqliteLtmRepository {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    fn find_similar_any(
+        &self,
+        embedding: &[f32],
+        max_distance: f64,
+        limit: usize,
+    ) -> Result<Vec<(TreeNode, f64)>> {
+        let embedding_bytes: &[u8] = unsafe {
+            std::slice::from_raw_parts(
+                embedding.as_ptr() as *const u8,
+                std::mem::size_of_val(embedding),
+            )
+        };
+
+        // Search the concept index and the leaf index independently (they are
+        // separate vec0 tables), then merge by distance. Each is queried for the
+        // full `limit` so a nearer leaf and a nearer concept both get a fair shot.
+        let query_index = |table: &str| -> rusqlite::Result<Vec<(TreeNode, f64)>> {
+            let sql = format!(
+                "SELECT n.id, n.name, n.summary, n.kind, n.permanent, n.created_at, n.updated_at,
+                        v.distance
+                 FROM {table} v
+                 JOIN tree_nodes n ON n.id = v.node_id
+                 WHERE v.embedding MATCH ?1 AND k = ?2
+                   AND v.distance <= ?3
+                 ORDER BY v.distance ASC"
+            );
+            let mut stmt = self.conn.prepare(&sql)?;
+            let rows = stmt.query_map(
+                params![embedding_bytes, limit as i64, max_distance],
+                |row| {
+                    let node = Self::row_to_node(row)?;
+                    let distance: f64 = row.get(7)?;
+                    Ok((node, distance))
+                },
+            )?;
+            rows.collect()
+        };
+
+        let mut merged = query_index("vec_ltm")?;
+        merged.extend(query_index("vec_leaves")?);
+        merged.sort_by(|a, b| a.1.total_cmp(&b.1));
+        merged.truncate(limit);
+        Ok(merged)
+    }
+
+    fn get_leaf(&self, tree_node_id: i64) -> Result<Option<Leaf>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT tree_node_id, data_id, provenance FROM leaves WHERE tree_node_id = ?1",
+        )?;
+        let mut rows = stmt.query(params![tree_node_id])?;
+        if let Some(row) = rows.next()? {
+            let tree_node_id: i64 = row.get(0)?;
+            let data_id: String = row.get(1)?;
+            let provenance_json: String = row.get(2)?;
+            let provenance: Provenance = serde_json::from_str(&provenance_json)?;
+            Ok(Some(Leaf {
+                tree_node_id,
+                data_id,
+                provenance,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
     fn get_inbox(&self) -> Result<Option<TreeNode>> {
         let node = self
             .conn
@@ -275,6 +348,10 @@ impl LtmRepository for SqliteLtmRepository {
             params![node_id],
         )?;
         tx.execute("DELETE FROM vec_ltm WHERE node_id = ?1", params![node_id])?;
+        tx.execute(
+            "DELETE FROM vec_leaves WHERE node_id = ?1",
+            params![node_id],
+        )?;
         tx.execute(
             "DELETE FROM leaves WHERE tree_node_id = ?1",
             params![node_id],
@@ -473,7 +550,14 @@ mod tests {
                 .collect::<rusqlite::Result<_>>()
                 .unwrap()
         };
-        for t in ["tree_nodes", "tree_edges", "leaves", "vec_ltm", "fts_ltm"] {
+        for t in [
+            "tree_nodes",
+            "tree_edges",
+            "leaves",
+            "vec_ltm",
+            "vec_leaves",
+            "fts_ltm",
+        ] {
             assert!(tables.contains(&t.to_string()), "{t} should exist");
         }
     }

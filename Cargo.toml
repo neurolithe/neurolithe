@@ -29,6 +29,9 @@ serde_json = "1.0.149"
 sqlite-vec = "0.1.6"
 thiserror = "2.0.18"
 tokio = { version = "1.49.0", features = ["full"] }
+# Mint synthetic dataIds for agent-authored LTM notes (note_<uuidv7>), matching
+# JARVIS's prefixed-UUIDv7 identity convention.
+uuid = { version = "1.11", features = ["v7"] }
 
 [dev-dependencies]
 tempfile = "3.25.0"

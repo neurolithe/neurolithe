@@ -95,6 +95,17 @@ pub trait MemoryRepository {
 
     /// How many STM nodes carry a given `dataId` (for `trace_dataId`).
     fn count_by_data_id(&self, data_id: &str) -> Result<i64>;
+
+    /// Idempotency: has a `memory.command` with this `commandId` already been
+    /// applied? Guards against Kafka at-least-once redelivery of writes.
+    fn is_command_processed(&self, command_id: &str) -> Result<bool>;
+
+    /// Record a `commandId` as applied (no-op if already present).
+    fn mark_command_processed(&self, command_id: &str) -> Result<()>;
+
+    /// Delete idempotency rows older than `older_than_days`; returns how many
+    /// were removed. Called from the periodic sweep.
+    fn sweep_processed_commands(&self, older_than_days: i64) -> Result<usize>;
 }
 
 /// A single STM fact, flattened for the introspection CT scan.

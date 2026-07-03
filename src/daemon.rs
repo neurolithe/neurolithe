@@ -3,15 +3,20 @@
 //! Everything holds a `rusqlite::Connection` (`!Sync`) and every loop is
 //! `?Send`, so the daemon runs them all on a single thread via a `LocalSet`:
 //! cooperative, no parallel access to the SQLite connections. The loops —
-//! MCP (stdio), the Kafka feeder, the `memory.command` consumer, and the decay
-//! + metrics schedulers — run concurrently until Ctrl-C.
+//! MCP (stdio), the Kafka feeder, the `memory.command` consumer (reset +
+//! remember/forget writes), the `memory.query` → `memory.result` query door,
+//! and the decay + metrics schedulers — run concurrently until Ctrl-C.
 
 use crate::application::app::NeurolitheApp;
 use crate::application::ingestion::IngestionService;
 use crate::application::introspection::IntrospectionService;
+use crate::application::ltm_retrieval::LtmRetrieval;
 use crate::application::monitoring::{FeederStats, MonitoringService};
+use crate::application::query_service::QueryService;
 use crate::application::reset_service::ResetService;
+use crate::application::retrieval::RetrievalService;
 use crate::application::scheduler::{PeriodicTask, SweepTask, run_periodic};
+use crate::application::write_service::WriteService;
 use crate::domain::ltm::LtmRepository;
 use crate::domain::ports::{ArtifactStore, LlmClient, MemoryRepository};
 use crate::infrastructure::config::{AppConfig, LlmProvider};
@@ -26,6 +31,7 @@ use crate::interfaces::command_consumer::{
 };
 use crate::interfaces::kafka_feeder::KafkaFeeder;
 use crate::interfaces::mcp_server::McpServer;
+use crate::interfaces::query_consumer::QueryConsumer;
 use anyhow::{Result, bail};
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -126,6 +132,12 @@ pub async fn run(config: AppConfig) -> Result<()> {
         ltm_repo.clone(),
         reset_token,
     ));
+    let write = Arc::new(WriteService::new(
+        stm_repo.clone(),
+        ltm_repo.clone(),
+        ingestion.clone(),
+        llm.clone(),
+    ));
     let feeder_stats = Arc::new(FeederStats::default());
 
     // --- feeder (optional) + rewind handle for hard reset ---
@@ -149,8 +161,25 @@ pub async fn run(config: AppConfig) -> Result<()> {
         &config.kafka.brokers,
         &format!("{}-cmd", config.kafka.group_id),
         reset,
+        write,
         rewind,
     )?);
+
+    // --- query consumer (memory.query -> memory.result), distinct group id ---
+    let query = if config.bus_query.enabled {
+        let query_service = Arc::new(QueryService::new(
+            RetrievalService::new(llm.clone(), stm_repo.clone()),
+            LtmRetrieval::new(ltm_repo.clone()),
+            llm.clone(),
+        ));
+        Some(Arc::new(QueryConsumer::new(
+            &config.kafka.brokers,
+            &format!("{}-query", config.kafka.group_id),
+            query_service,
+        )?))
+    } else {
+        None
+    };
 
     // --- schedulers ---
     let sweep_task: Arc<dyn PeriodicTask> = Arc::new(SweepTask::new(app.clone()));
@@ -189,12 +218,19 @@ pub async fn run(config: AppConfig) -> Result<()> {
             }
         });
     }
+    if let Some(q) = query.clone() {
+        tokio::task::spawn_local(async move {
+            if let Err(e) = q.run().await {
+                eprintln!("[neurolithe] query consumer stopped: {e}");
+            }
+        });
+    }
     tokio::task::spawn_local(run_periodic(sweep_task, sweep_interval));
     tokio::task::spawn_local(run_periodic(metrics_task, metrics_interval));
 
     eprintln!(
-        "[neurolithe] daemon running (feeder enabled: {})",
-        config.feeder.enabled
+        "[neurolithe] daemon running (feeder: {}, query door: {})",
+        config.feeder.enabled, config.bus_query.enabled
     );
     shutdown_signal().await;
     eprintln!("[neurolithe] shutting down");
