@@ -15,13 +15,18 @@ jobs:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     strategy:
+      # Don't let one target's failure cancel the others — ship whatever builds.
+      fail-fast: false
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             artifact: neurolithe
+          # `macos-latest` is Apple Silicon (arm64); rdkafka-sys builds its
+          # vendored C lib for the runner arch, so an x86_64 cross-build there
+          # link-fails. Build x86_64 on the Intel runner (macos-13) instead.
           - target: x86_64-apple-darwin
-            os: macos-latest
+            os: macos-13
             artifact: neurolithe
           - target: aarch64-apple-darwin
             os: macos-latest
