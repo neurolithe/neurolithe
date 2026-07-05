@@ -17,7 +17,9 @@
   <a href="https://neurolithe.com"><img src="https://img.shields.io/badge/website-neurolithe.com-cyan.svg" alt="Website"></a>
 </p>
 
-**NeuroLithe** is built in 🦀 Rust to solve the **context memory problem** for AI agents. By providing both strictly managed **short-term memory** (STM) and unbounded, highly-retrievable **long-term memory** (LTM) via hybrid vector/keyword search, it allows intelligent systems to recall past interactions without drowning the LLM prompt in full conversation history.
+**NeuroLithe** is built in 🦀 Rust to solve the **context memory problem** for AI agents. It gives an agent **two distinct memory regimes** — a fast, *decaying* **short-term memory** (STM) for "what's happening right now," and a permanent, non-decaying **long-term memory** (LTM) knowledge tree — both searchable by meaning (`sqlite-vec`) and by keyword (FTS5), so an agent recalls the right context without drowning the prompt in full history.
+
+Run it two ways: as an embedded **MCP server** over STDIO (drop-in agent memory), or as a long-running **daemon** that feeds itself from a Kafka event stream and answers memory queries over the bus.
 
 <p align="center">
 <strong><a href="#-quick-start">Quick Start</a> • <a href="#-features">Features</a> • <a href="#-tech-stack">Tech Stack</a> • <a href="#-contributing">Contributing</a> • <a href="https://docs.neurolithe.com">Documentation</a></strong>
@@ -30,13 +32,13 @@
 **macOS / Linux:**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/neurolithe/neurolithe/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/neurolithe/neurolithe/master/install.sh | bash
 ```
 
 **Windows (PowerShell):**
 
 ```powershell
-irm https://raw.githubusercontent.com/neurolithe/neurolithe/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/neurolithe/neurolithe/master/install.ps1 | iex
 ```
 
 > [!NOTE]
@@ -65,7 +67,7 @@ Add NeuroLithe to your MCP client (*Claude Desktop, Cursor, etc.*). The install 
   "mcpServers": {
     "neurolithe": {
       "command": "~/.neurolithe/bin/neurolithe",
-      "args": [],
+      "args": ["mcp"],
       "env": {
         "NEUROLITHE_API_KEY": "your-api-key"
       }
@@ -74,16 +76,38 @@ Add NeuroLithe to your MCP client (*Claude Desktop, Cursor, etc.*). The install 
 }
 ```
 
+> [!NOTE]
+> The `mcp` subcommand runs the one-shot **MCP server** over STDIO. Running the
+> binary with **no arguments** starts the full **daemon** instead (Kafka feeder +
+> bus memory API) — see [Run modes](#-run-modes).
+
+## 🔀 Run modes
+
+NeuroLithe ships one binary with two subcommands:
+
+```bash
+neurolithe mcp      # one-shot MCP server over STDIO (embedded agent memory)
+neurolithe daemon   # long-running: MCP + Kafka feeder + bus memory API + scheduler
+```
+
+- **`mcp`** — the drop-in option for an MCP client (Claude Desktop, Cursor, …). No Kafka required; just `[llm]` + `[stm]` + `[ltm]` config.
+- **`daemon`** — the event-driven brain: consumes `document.completed`, distills each item into STM + LTM, answers `memory.query`→`memory.result`, applies `memory.command` (remember/forget/reset), and publishes a `memory.metrics` CT-scan. Needs a Kafka broker (see [`docker-compose.yml`](docker-compose.yml)).
+
+> Running the binary with **no subcommand** starts the **daemon**. MCP clients must pass `["mcp"]`.
+
 ## ✨ Features
 
-- 📉 **Lower LLM Costs:** Minimize token usage by passing only the most relevant, retrieved information to the LLM during communication.
-- ⚡ **Increased Efficiency:** Give the AI exactly the right amount of context it needs to perform tasks effectively, avoiding context window limits and reducing hallucinations.
-- 🧠 **Hybrid Storage Model:**
-  - **Short-Term Memory (STM):** Tracks recent, relevant dialogue. High priority for task context.
-  - **Long-Term Memory (LTM):** As STM fills up, old interactions are *compressed* into long-term factual nodes using SQLite + semantic vector embeddings (`sqlite-vec`).
-- 🗄️ **Seamless Integration:** Runs locally as an embedded database, meaning zero external infrastructure to manage.
-- ⏱️ **Adaptive Forgetting Curve:** Simulates human memory dynamics. Unused or unimportant factual nodes gradually decay over time unless reinforced.
-- 🌌 **Cognitive Context Layers (CCL):** Segregate memories by conceptual layers (e.g., 'reality', 'dream', 'simulation') to prevent AI hallucination and enable advanced counterfactual reasoning during hybrid searches.
+- 🧠 **Dual-memory architecture (V2):** two independent SQLite stores, so the two problems don't fight each other:
+  - **Short-Term Memory (STM)** — a fast, *decaying* fact engine for recent, relevant context. Facts fade on a half-life curve unless reinforced.
+  - **Long-Term Memory (LTM)** — a permanent, *non-decaying* knowledge tree. Documents/notes are placed as leaves under a growing concept hierarchy; the forgetting curve never touches it.
+- 🔎 **Hybrid retrieval:** semantic vector search (`sqlite-vec`) + BM25 keyword search (FTS5) + 1-hop graph traversal, natively in SQL. LTM recall is *reference-returning* (`dataId` + provenance) so you can fetch originals.
+- 🧭 **Working memory (situational awareness):** a connected **session graph** — the agent's recent *turns* linked by `about` edges to the documents/entities they touched, with a **focus** so follow-ups like "what is *its* id?" resolve from context, not a fuzzy re-search.
+- ⏱️ **Adaptive forgetting curve:** real-elapsed, **per-layer** exponential decay — situational notes fade in minutes-to-hours, durable facts over days; reads reinforce (reset the clock). A sweep or restart never wipes fresh memory.
+- 🌌 **Cognitive Context Layers (CCL):** segregate memories by conceptual layer (`reality`, `working`, `dream`, `simulation`, …) to prevent cross-talk and enable counterfactual reasoning.
+- 🔌 **Two run modes:** an embedded **MCP server** over STDIO (drop-in agent memory) *or* a long-running **daemon** that feeds itself from Kafka (`document.completed`) and serves reads/writes over the bus (`memory.query` / `memory.command`). See [Run modes](#-run-modes).
+- 🩻 **Introspection ("CT scan"):** read-only tools + a `memory.metrics` snapshot to see exactly what the brain holds (STM/LTM counts, sizes, layers).
+- 🛠️ **Bring your own LLM:** chat + embeddings are configurable and can differ — OpenAI, Google (Gemini / Vertex `text-embedding-004`), Anthropic Claude, or fully **local/offline** via Ollama (`nomic-embed-text`). Keys via env / `.env`.
+- 🗄️ **Zero external infra (MCP mode):** runs locally as an embedded database — nothing to manage. (The daemon mode adds Kafka when you want the event-driven pipeline.)
 
 ## 🛠️ Tech Stack
 
@@ -93,7 +117,8 @@ NeuroLithe is built for speed, safety, and conciseness using modern technologies
 - **Database:** [SQLite](https://sqlite.org/) + `rusqlite` — Fast, file-based SQL database optimized with WAL mode.
 - **Vector Search:** `sqlite-vec` & FTS5 — Powering hybrid search (semantic vector embeddings + BM25 full-text search) natively in SQL.
 - **Async Runtime:** `tokio` — Handling concurrent operations efficiently.
-- **LLM Integration:** `reqwest` & `serde` — For fast asynchronous communication with OpenAI to generate text embeddings and extract factual models.
+- **LLM Integration:** `reqwest` & `serde` — Provider-agnostic clients for OpenAI, Google (Gemini / Vertex AI), Anthropic Claude, and local OpenAI-compatible endpoints (Ollama). Chat and embedding providers are configured independently.
+- **Event Backbone (daemon):** `rdkafka` — Consumes `document.completed` and serves a request/reply memory API over Kafka.
 - **Protocol:** [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) — Operating seamlessly as an intelligent MCP server over standard input/output (STDIO).
 
 ## 🤝 Contributing

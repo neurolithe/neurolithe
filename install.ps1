@@ -1,6 +1,6 @@
 # ──────────────────────────────────────────────────────────────
 #  NeuroLithe Installer for Windows
-#  One-line install: irm https://raw.githubusercontent.com/neurolithe/neurolithe/main/install.ps1 | iex
+#  One-line install: irm https://raw.githubusercontent.com/neurolithe/neurolithe/master/install.ps1 | iex
 # ──────────────────────────────────────────────────────────────
 
 $ErrorActionPreference = "Stop"
@@ -99,7 +99,8 @@ provider = "custom"
 # Model for fact extraction and context compression
 model = "openai/gpt-4o-mini"
 
-# Model for vector embeddings (semantic search)
+# Model for vector embeddings (semantic search). Its output size MUST match the
+# vector_dimension of the stores below.
 embedding_model = "openai/text-embedding-3-small"
 
 # Base URL for API calls (required for "custom" provider)
@@ -108,14 +109,19 @@ embedding_model = "openai/text-embedding-3-small"
 # LM Studio:       http://localhost:1234/v1
 base_url = "https://openrouter.ai/api/v1"
 
-[database]
-# SQLite database path
-path = "neurolithe.sqlite"
+# V2 dual memory: two independent SQLite stores.
+#   STM = the decaying short-term working-memory engine.
+#   LTM = the permanent long-term knowledge tree (never decays).
+# Each store LOCKS its vector_dimension at first run - it must match your
+# embedding model's output size, and both stores must share it:
+#   text-embedding-3-small = 1536 . text-embedding-004 / nomic-embed-text = 768.
+# To resize later, delete the .sqlite file so the sqlite-vec table is rebuilt.
+[stm]
+path = "neurolithe-stm.sqlite"
+vector_dimension = 1536
 
-# Embedding vector dimension (must match your model)
-# OpenAI text-embedding-3-small: 1536
-# Google text-embedding-004:     768
-# Nomic nomic-embed-text:        768
+[ltm]
+path = "neurolithe-ltm.sqlite"
 vector_dimension = 1536
 "@ | Set-Content -Path $configFile -Encoding UTF8
 
@@ -161,7 +167,7 @@ function New-McpConfig {
   "mcpServers": {
     "neurolithe": {
       "command": "$binaryPath",
-      "args": [],
+      "args": ["mcp"],
       "env": {
         "NEUROLITHE_API_KEY": "YOUR_API_KEY_HERE"
       }
