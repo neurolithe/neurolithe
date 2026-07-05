@@ -31,9 +31,10 @@ jobs:
           - target: aarch64-apple-darwin
             os: macos-latest
             artifact: neurolithe
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-            artifact: neurolithe.exe
+          # NOTE: no prebuilt Windows target — rdkafka-sys (added in V2) builds
+          # its vendored librdkafka via a Unix `configure` that fails on Windows
+          # MSVC. Windows users build from source (WSL) or run the Docker image.
+          # Restore this target once rdkafka is feature-gated or `cmake-build`ing.
 
     steps:
       - uses: actions/checkout@v4

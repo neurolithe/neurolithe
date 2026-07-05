@@ -35,14 +35,11 @@ Run it two ways: as an embedded **MCP server** over STDIO (drop-in agent memory)
 curl -fsSL https://raw.githubusercontent.com/neurolithe/neurolithe/master/install.sh | bash
 ```
 
-**Windows (PowerShell):**
-
-```powershell
-irm https://raw.githubusercontent.com/neurolithe/neurolithe/master/install.ps1 | iex
-```
-
 > [!NOTE]
-> This automatically downloads the latest binary, creates config files, prompts for your LLM API key, and provides a ready-to-use MCP configuration snippet.
+> This automatically downloads the latest binary (macOS Intel/Apple-Silicon, Linux x86_64), creates config files, prompts for your LLM API key, and provides a ready-to-use MCP configuration snippet.
+
+> [!IMPORTANT]
+> **Windows:** there is no prebuilt Windows binary yet — the Kafka client (`rdkafka`) doesn't build cleanly on MSVC. On Windows, use **WSL** with the command above, run the **Docker image** (`docker compose up`), or build from source in a Unix-like environment.
 
 <details>
 <summary><b>Install from source</b></summary>
