@@ -288,7 +288,7 @@ mod tests {
         let repo = Arc::new(SqliteLtmRepository::new(conn));
 
         let root = repo
-            .create_node(&TreeNode::new("Reza", "root", TreeNodeKind::Spine), None)
+            .create_node(&TreeNode::new("root", "root", TreeNodeKind::Spine), None)
             .unwrap();
         let jobs = repo
             .create_node(
@@ -436,7 +436,7 @@ mod tests {
 
         // A concept off in one direction; a document leaf embedded in another.
         let root = repo
-            .create_node(&TreeNode::new("Reza", "root", TreeNodeKind::Spine), None)
+            .create_node(&TreeNode::new("root", "root", TreeNodeKind::Spine), None)
             .unwrap();
         let concept = repo
             .create_node(

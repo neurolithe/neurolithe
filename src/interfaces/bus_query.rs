@@ -20,8 +20,9 @@ use crate::domain::models::{MemoryResult, TimeFilter};
 use serde::{Deserialize, Serialize};
 
 /// The feeder ingests under tenant `jarvis`; the bus door must default here or
-/// Metis reads an empty store (design §11 / plan finding 5).
-pub const DEFAULT_TENANT: &str = "jarvis";
+/// Metis reads an empty store (design §11 / plan finding 5). Re-exported from the
+/// one source of truth so this door and the MCP door can never drift again.
+pub use crate::domain::models::DEFAULT_TENANT;
 /// Default recall breadth when the request omits `k`.
 pub const DEFAULT_K: usize = 5;
 
@@ -133,6 +134,11 @@ pub struct StmEntry {
     pub ccl: String,
     pub last_updated: String,
     pub connections: Vec<StmConnection>,
+    /// Archive reference (`dataId`) this fact came from, when present — so a bus
+    /// consumer (Metis) can trace/fetch the source document straight from a
+    /// search hit. Omitted on the wire when absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_id: Option<String>,
     /// Working-memory thread this note belongs to. Present only for `stm_map`
     /// entries (situational notes); omitted for ordinary STM facts — so old
     /// consumers and non-working replies are unchanged on the wire.
@@ -154,6 +160,7 @@ impl StmEntry {
                     entity: c.entity.clone(),
                 })
                 .collect(),
+            data_id: m.data_id.clone(),
             context_key: m.context_key.clone(),
         }
     }
@@ -329,6 +336,7 @@ mod tests {
             ccl: "working".into(),
             last_updated: "2026-07-02T00:00:00Z".into(),
             connections: vec![],
+            data_id: None,
             context_key: Some("chat.jid:42".into()),
         };
         let v = serde_json::to_value(&base).unwrap();
@@ -381,7 +389,7 @@ mod tests {
     #[test]
     fn stm_entry_drops_internal_connection_fields() {
         let m = MemoryResult {
-            fact: "Reza's dentist is Dr. Lee".to_string(),
+            fact: "the user's dentist is Dr. Lee".to_string(),
             ccl: "reality".to_string(),
             last_updated: "2026-06-30T00:00:00Z".to_string(),
             connections: vec![MemoryConnection {
@@ -391,6 +399,7 @@ mod tests {
                 valid_from: Some("2026-01-01".to_string()),
                 valid_until: None,
             }],
+            data_id: Some("doc_dentist".to_string()),
             context_key: None,
         };
         let entry = StmEntry::from_memory_result(&m);
@@ -459,13 +468,14 @@ mod tests {
     #[test]
     fn reply_serialization_matches_design_section_6() {
         let stm = vec![StmEntry {
-            fact: "Reza's dentist is Dr. Lee".to_string(),
+            fact: "the user's dentist is Dr. Lee".to_string(),
             ccl: "reality".to_string(),
             last_updated: "2026-06-30T00:00:00Z".to_string(),
             connections: vec![StmConnection {
                 relation: "at".to_string(),
                 entity: "Kerrisdale".to_string(),
             }],
+            data_id: None,
             context_key: None,
         }];
         let ltm = vec![LtmEntry {
@@ -480,7 +490,12 @@ mod tests {
             distance: 0.12,
             ancestors: vec!["Health".to_string()],
         }];
-        let reply = MemoryReply::success("abc", stm, ltm, vec!["Reza's dentist is Dr. Lee".into()]);
+        let reply = MemoryReply::success(
+            "abc",
+            stm,
+            ltm,
+            vec!["the user's dentist is Dr. Lee".into()],
+        );
         let v = serde_json::to_value(&reply).unwrap();
 
         assert_eq!(v["correlationId"], "abc");
@@ -488,7 +503,7 @@ mod tests {
         assert_eq!(v["stm"][0]["lastUpdated"], "2026-06-30T00:00:00Z");
         assert_eq!(v["ltm"][0]["dataId"], "doc_123");
         assert_eq!(v["ltm"][0]["concept"], "Health / Dental");
-        assert_eq!(v["seededBy"][0], "Reza's dentist is Dr. Lee");
+        assert_eq!(v["seededBy"][0], "the user's dentist is Dr. Lee");
         assert_eq!(v["error"], serde_json::Value::Null);
     }
 

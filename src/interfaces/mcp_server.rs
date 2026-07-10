@@ -1,11 +1,16 @@
 use crate::application::app::NeurolitheApp;
-use crate::application::introspection::IntrospectionService;
-use crate::domain::models::TimeFilter;
+use crate::application::introspection::{IntrospectionService, LeafPage};
+use crate::application::query_service::{QueryRequest, QueryScope, QueryService};
+use crate::domain::models::{DEFAULT_TENANT, TimeFilter};
+use crate::interfaces::bus_query::flatten_recall;
 use crate::interfaces::mcp_types::{JsonRpcRequest, JsonRpcResponse, McpToolResult};
 use serde::Serialize;
 use serde_json::Value;
 use std::sync::Arc;
 use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+/// Default recall breadth for the MCP query tools when the caller omits it.
+const DEFAULT_K: usize = 10;
 
 /// Render an introspection result as an MCP tool result (JSON text on success).
 fn introspect_result<T: Serialize>(result: anyhow::Result<T>) -> McpToolResult {
@@ -20,11 +25,68 @@ fn introspect_result<T: Serialize>(result: anyhow::Result<T>) -> McpToolResult {
 pub struct McpServer {
     app: Arc<NeurolitheApp>,
     introspection: Arc<IntrospectionService>,
+    /// The shared recall use-case — the SAME service the `memory.query` bus door
+    /// runs on (design §7 "doors"). Both delivery adapters route through it so
+    /// the two doors can never drift on tenant/scope semantics again (the cause
+    /// of the field-report §1 empty-results bug).
+    query: QueryService,
 }
 
 impl McpServer {
-    pub fn new(app: Arc<NeurolitheApp>, introspection: Arc<IntrospectionService>) -> Self {
-        Self { app, introspection }
+    pub fn new(
+        app: Arc<NeurolitheApp>,
+        introspection: Arc<IntrospectionService>,
+        query: QueryService,
+    ) -> Self {
+        Self {
+            app,
+            introspection,
+            query,
+        }
+    }
+
+    /// Build a [`QueryRequest`] from MCP tool arguments, applying the shared
+    /// defaults (tenant = [`DEFAULT_TENANT`], `reality` layer, breadth
+    /// [`DEFAULT_K`]). `scope` is fixed per tool. Keeps both query tools on one
+    /// parse path so their defaults never diverge.
+    fn query_request(&self, args: &Value, scope: QueryScope) -> QueryRequest {
+        let tenant = args
+            .get("tenant_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or(DEFAULT_TENANT)
+            .to_string();
+        let query = args
+            .get("query")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let time_filter = args
+            .get("time_filter")
+            .and_then(|tf| serde_json::from_value::<TimeFilter>(tf.clone()).ok())
+            .unwrap_or_default();
+        let ccl: Vec<String> = args
+            .get("ccl_filter")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let k = args
+            .get("k")
+            .and_then(|v| v.as_u64())
+            .map(|k| k as usize)
+            .unwrap_or(DEFAULT_K);
+        QueryRequest {
+            scope,
+            tenant,
+            query,
+            k,
+            time_filter,
+            ccl,
+            context_key: None,
+        }
     }
 
     pub async fn run_stdio(&self) -> anyhow::Result<()> {
@@ -79,7 +141,7 @@ impl McpServer {
                     let tenant_id = tool_args
                         .get("tenant_id")
                         .and_then(|v| v.as_str())
-                        .unwrap_or("default");
+                        .unwrap_or(DEFAULT_TENANT);
                     let fact_text = tool_args
                         .get("fact_text")
                         .and_then(|v| v.as_str())
@@ -112,7 +174,7 @@ impl McpServer {
                     let tenant_id = tool_args
                         .get("tenant_id")
                         .and_then(|v| v.as_str())
-                        .unwrap_or("default");
+                        .unwrap_or(DEFAULT_TENANT);
                     let session_id = tool_args
                         .get("session_id")
                         .and_then(|v| v.as_str())
@@ -140,48 +202,38 @@ impl McpServer {
                     }
                 }
                 "query_memory" => {
-                    let tenant_id = tool_args
-                        .get("tenant_id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("default");
-                    let query = tool_args
-                        .get("query")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-
-                    // Parse optional time_filter
-                    let time_filter = tool_args
-                        .get("time_filter")
-                        .and_then(|tf| serde_json::from_value::<TimeFilter>(tf.clone()).ok())
-                        .unwrap_or_default();
-                    let ccl_filter: Vec<String> = tool_args
-                        .get("ccl_filter")
-                        .and_then(|v| v.as_array())
-                        .map(|arr| {
-                            arr.iter()
-                                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                                .collect()
-                        })
-                        .unwrap_or_else(|| vec!["reality".to_string()]);
-
-                    match self
-                        .app
-                        .query_memory(tenant_id, query, &time_filter, &ccl_filter)
-                        .await
-                    {
-                        Ok(results) => {
+                    // STM recall over the shared QueryService (same path as the
+                    // bus door). Defaults to the JARVIS tenant the feeder writes.
+                    let req = self.query_request(&tool_args, QueryScope::Stm);
+                    match self.query.execute(&req).await {
+                        Ok(outcome) => {
                             let json_results =
-                                serde_json::to_string(&results).unwrap_or("[]".into());
+                                serde_json::to_string(&outcome.stm).unwrap_or("[]".into());
                             McpToolResult::ok(&json_results)
                         }
                         Err(e) => McpToolResult::err(format!("Query failed: {}", e)),
+                    }
+                }
+                "recall_ltm" => {
+                    // Reference-returning search of the permanent archive: locate
+                    // the nearest concept/document and surface its `dataId` +
+                    // provenance so the caller can fetch the original (design §3.3).
+                    let req = self.query_request(&tool_args, QueryScope::Ltm);
+                    match self.query.execute(&req).await {
+                        Ok(outcome) => {
+                            let entries: Vec<_> =
+                                outcome.ltm.iter().flat_map(flatten_recall).collect();
+                            let json = serde_json::to_string(&entries).unwrap_or("[]".into());
+                            McpToolResult::ok(&json)
+                        }
+                        Err(e) => McpToolResult::err(format!("LTM recall failed: {}", e)),
                     }
                 }
                 "delete_tenant" => {
                     let tenant_id = tool_args
                         .get("tenant_id")
                         .and_then(|v| v.as_str())
-                        .unwrap_or("default");
+                        .unwrap_or(DEFAULT_TENANT);
                     match self.app.delete_tenant(tenant_id).await {
                         Ok(_) => McpToolResult::ok(format!(
                             "Successfully deleted all data for tenant {}",
@@ -194,7 +246,7 @@ impl McpServer {
                     let tenant_id = tool_args
                         .get("tenant_id")
                         .and_then(|v| v.as_str())
-                        .unwrap_or("default");
+                        .unwrap_or(DEFAULT_TENANT);
                     match self.app.export_tenant(tenant_id).await {
                         Ok(json_export) => McpToolResult::ok(&json_export),
                         Err(e) => McpToolResult::err(format!("Export failed: {}", e)),
@@ -203,13 +255,25 @@ impl McpServer {
                 // --- read-only introspection (CT scan) ---
                 "memory_stats" => introspect_result(self.introspection.memory_stats()),
                 "health" => introspect_result(self.introspection.health()),
+                "placement_debug" => {
+                    let sample = tool_args
+                        .get("sample")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(30) as usize;
+                    introspect_result(self.introspection.placement_debug(sample))
+                }
                 "stm_list" => {
                     let limit = tool_args
                         .get("limit")
                         .and_then(|v| v.as_u64())
                         .unwrap_or(20) as usize;
+                    let offset = tool_args
+                        .get("offset")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as usize;
                     let status = tool_args.get("status").and_then(|v| v.as_str());
-                    introspect_result(self.introspection.stm_list(limit, status))
+                    let contains = tool_args.get("contains").and_then(|v| v.as_str());
+                    introspect_result(self.introspection.stm_list(limit, offset, status, contains))
                 }
                 "ltm_map" => {
                     let depth =
@@ -217,7 +281,23 @@ impl McpServer {
                     introspect_result(self.introspection.ltm_map(depth))
                 }
                 "inspect_node" => match tool_args.get("id").and_then(|v| v.as_i64()) {
-                    Some(node_id) => introspect_result(self.introspection.inspect_node(node_id)),
+                    Some(node_id) => {
+                        let page = LeafPage {
+                            child_limit: tool_args
+                                .get("child_limit")
+                                .and_then(|v| v.as_u64())
+                                .map(|v| v as usize),
+                            child_offset: tool_args
+                                .get("child_offset")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0) as usize,
+                            summary_max_chars: tool_args
+                                .get("summary_max_chars")
+                                .and_then(|v| v.as_u64())
+                                .map(|v| v as usize),
+                        };
+                        introspect_result(self.introspection.inspect_node(node_id, page))
+                    }
                     None => McpToolResult::err("inspect_node requires an integer 'id'"),
                 },
                 "subtree" => match tool_args.get("node").and_then(|v| v.as_i64()) {
@@ -284,11 +364,12 @@ impl McpServer {
                     },
                     {
                         "name": "query_memory",
-                        "description": "Search the long-term knowledge graph for relevant historical context. Returns token-optimized results with 1-hop connections and temporal bounds.",
+                        "description": "Search SHORT-TERM working memory (recent/decaying facts) for relevant context. Hybrid keyword + semantic search; returns token-optimized facts with 1-hop connections and temporal bounds. For the permanent archive of documents, use recall_ltm.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
                                 "query": { "type": "string", "description": "The query to search for in memory" },
+                                "k": { "type": "integer", "description": "Max facts to return. Defaults to 10." },
                                 "time_filter": {
                                     "type": "object",
                                     "description": "Optional temporal boundaries",
@@ -297,7 +378,19 @@ impl McpServer {
                                         "before": { "type": "string", "description": "Only return memories before this date (YYYY-MM-DD)" }
                                     }
                                 },
-                                "tenant_id": { "type": "string", "description": "Optional tenant ID. Defaults to 'default'." }
+                                "tenant_id": { "type": "string", "description": "Optional tenant ID. Defaults to the JARVIS tenant ('jarvis')." }
+                            },
+                            "required": ["query"]
+                        }
+                    },
+                    {
+                        "name": "recall_ltm",
+                        "description": "Search the PERMANENT long-term archive (all ingested documents) by meaning. Reference-returning: each hit carries the document's dataId + provenance + ancestor concepts, so you can fetch the original. This is the primary tool for finding a scanned document, receipt, letter, or report.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "query": { "type": "string", "description": "What to look for in the archive (a phrase, topic, merchant, or document description)." },
+                                "tenant_id": { "type": "string", "description": "Optional tenant ID. Defaults to the JARVIS tenant ('jarvis')." }
                             },
                             "required": ["query"]
                         }
@@ -331,17 +424,30 @@ impl McpServer {
                     },
                     {
                         "name": "health",
-                        "description": "Compact health summary: STM/LTM counts, orphan leaves, DB sizes, feeder lag.",
+                        "description": "Compact health summary: STM/LTM counts, orphan leaves, DB sizes, feeder lag (feeder_lag = -1 means unknown on this on-demand path; live lag is on the memory.metrics stream).",
                         "inputSchema": { "type": "object", "properties": {}, "required": [] }
                     },
                     {
+                        "name": "placement_debug",
+                        "description": "Placement calibration: for a sample of document leaves, the distance to their nearest concept (threshold-free). Used to tune the placement threshold to real embedding distances.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "sample": { "type": "integer", "description": "Number of leaves to probe. Defaults to 30." }
+                            },
+                            "required": []
+                        }
+                    },
+                    {
                         "name": "stm_list",
-                        "description": "List STM working-memory facts (most-relevant first) with score, status, and age.",
+                        "description": "List STM working-memory facts (most-relevant first) with score, status, and age. Supports pagination and a keyword filter so you can find facts without pulling the whole store.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
                                 "limit": { "type": "integer", "description": "Max facts to return. Defaults to 20." },
-                                "status": { "type": "string", "description": "Optional filter: 'active' or 'archived'." }
+                                "offset": { "type": "integer", "description": "How many facts to skip (pagination). Defaults to 0." },
+                                "status": { "type": "string", "description": "Optional filter: 'active' or 'archived'." },
+                                "contains": { "type": "string", "description": "Optional case-insensitive substring the fact text must contain." }
                             },
                             "required": []
                         }
@@ -359,11 +465,14 @@ impl McpServer {
                     },
                     {
                         "name": "inspect_node",
-                        "description": "Inspect one LTM node: its summary, parents, children, and document leaves (dataIds + provenance).",
+                        "description": "Inspect one LTM node: its summary, parents, children, and document leaves (dataIds + provenance). Children/leaves are paged (child_limit/child_offset) and summaries capped (summary_max_chars); child_count/leaf_count report the totals.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
-                                "id": { "type": "integer", "description": "The LTM node id." }
+                                "id": { "type": "integer", "description": "The LTM node id." },
+                                "child_limit": { "type": "integer", "description": "Max children/leaves to return. Defaults to 50." },
+                                "child_offset": { "type": "integer", "description": "How many children/leaves to skip (pagination). Defaults to 0." },
+                                "summary_max_chars": { "type": "integer", "description": "Cap each summary to this many chars (0 = full). Defaults to 200." }
                             },
                             "required": ["id"]
                         }

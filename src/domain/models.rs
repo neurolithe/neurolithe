@@ -3,6 +3,14 @@ use serde::{Deserialize, Serialize};
 /// The default cognitive layer for knowledge facts (documents, extracted facts).
 pub const REALITY_CCL: &str = "reality";
 
+/// The single tenant every JARVIS door defaults to. The Kafka feeder ingests
+/// documents under this tenant, so **both** delivery doors — the `memory.query`
+/// bus API (Metis) and the MCP server (agent/CT-scan) — must default here or a
+/// query reads an empty store (the field-report §1 bug: the MCP door had drifted
+/// to `"default"` while the feeder wrote `"jarvis"`). Callers wanting another
+/// tenant pass it explicitly. Keep this as the one source of truth.
+pub const DEFAULT_TENANT: &str = "jarvis";
+
 /// The working-memory layer: short-lived situational notes the agent leaves for
 /// itself (STM-WORKING-MEMORY). Decays on a much shorter half-life than
 /// `reality` so stale session context fades fast (see [`crate::domain::decay`]).
@@ -72,13 +80,21 @@ pub struct TimeFilter {
     pub before: Option<String>,
 }
 
-/// Token-optimized output for query_memory (no internal IDs/scores)
+/// Token-optimized output for query_memory. Deliberately hides internal
+/// node ids/scores, but **does** carry the external `data_id` (the archive
+/// reference), so a search hit can be handed straight to Ledger/Pithos to fetch
+/// the original — the search → trace → fetch pipeline the agent needs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryResult {
     pub fact: String,
     pub ccl: String,
     pub last_updated: String,
     pub connections: Vec<MemoryConnection>,
+    /// The document/archive reference this fact came from (`dataId` in the
+    /// payload), when present. Lets the agent go straight from a `query_memory`
+    /// hit to fetching the source without a second `stm_list` scan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_id: Option<String>,
     /// Working-memory context key, populated only by the recency read
     /// (`recent_in_context`); `None` on ordinary knowledge retrieval. Lets the
     /// bus reply tell the agent which thread a situational note belongs to.

@@ -7,14 +7,56 @@
 //! see `V2-DESIGN.md` §3.2 and `JARVIS-MEMORY-TREE.md`.
 
 use crate::domain::ltm::{Leaf, LtmRepository, Provenance, TreeEdge, TreeNode, TreeNodeKind};
-use anyhow::{Result, anyhow};
+use crate::domain::ports::LlmClient;
+use anyhow::{Result, anyhow, bail};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
-/// Max L2 distance for a document to count as matching a concept node. Beyond
-/// this it falls to the inbox. (Embeddings are expected roughly normalized;
-/// matches `find_similar_nodes`' distance convention in the STM engine.)
-const DEFAULT_MAX_DISTANCE: f64 = 0.5;
+/// Max L2 distance for a document to count as matching a concept node; beyond
+/// it, the document falls to the inbox.
+///
+/// Tuned from **measured** distances on real data (`placement_debug` over the
+/// live corpus): document→concept L2 distances cluster in ~[0.91, 1.16] (median
+/// 1.05) for unit-normalized `text-embedding-004`, i.e. cosine ~0.33–0.59 — much
+/// larger than a category label suggests. 1.10 (cosine ≈ 0.40) files the
+/// confident majority under their nearest branch while leaving the ambiguous
+/// tail in the inbox. Earlier guesses (0.5, then 0.85) were below the whole
+/// distribution and filed 100% to the inbox (field-report §3).
+const DEFAULT_MAX_DISTANCE: f64 = 1.10;
+
+/// Embed every concept node that lacks a placement vector, deriving the vector
+/// from the concept's curated identity (`name: summary`) — **not** its rolling
+/// summary, so filing targets stay stable as documents accumulate. Idempotent:
+/// embeds only the missing ones, so steady-state startups make zero LLM calls.
+/// Returns how many concepts were embedded. The daemon runs this after
+/// `seed_spine` so placement has live match targets.
+pub async fn embed_spine_concepts(
+    ltm: &Arc<dyn LtmRepository>,
+    llm: &Arc<dyn LlmClient>,
+    expected_dim: usize,
+) -> Result<usize> {
+    let mut embedded = 0;
+    for node in ltm.concepts_missing_embedding()? {
+        let id = node.id.expect("stored node has id");
+        let text = if node.summary.trim().is_empty() {
+            node.name.clone()
+        } else {
+            format!("{}: {}", node.name, node.summary)
+        };
+        let embedding = llm.embed_text(&text).await?;
+        if embedding.len() != expected_dim {
+            bail!(
+                "concept '{}' embedding dim {} != LTM dim {}",
+                node.name,
+                embedding.len(),
+                expected_dim
+            );
+        }
+        ltm.set_concept_embedding(id, &embedding)?;
+        embedded += 1;
+    }
+    Ok(embedded)
+}
 
 /// Cap on a rolled summary's length (characters) before truncation.
 const DEFAULT_MAX_SUMMARY_LEN: usize = 600;
@@ -92,10 +134,19 @@ impl LtmPlacement {
             &TreeNode::new(doc.name.clone(), doc.summary.clone(), TreeNodeKind::Leaf),
             Some(&doc.embedding),
         )?;
+        // Stamp the ingest time from the DB-assigned `created_at` when the caller
+        // didn't supply one, so `provenance.ingested_at` is populated everywhere
+        // it surfaces (listings, recall, trace) — it was null on every leaf
+        // before (field-report §5). No wall-clock dependency: the tree node's
+        // created_at is the authoritative ingest instant.
+        let mut provenance = doc.provenance.clone();
+        if provenance.ingested_at.is_none() {
+            provenance.ingested_at = self.repo.get_node(leaf_node_id)?.and_then(|n| n.created_at);
+        }
         self.repo.create_leaf(&Leaf {
             tree_node_id: leaf_node_id,
             data_id: doc.data_id.clone(),
-            provenance: doc.provenance.clone(),
+            provenance,
         })?;
         self.repo
             .add_edge(&TreeEdge::new(parent_id, leaf_node_id))?;
@@ -108,6 +159,46 @@ impl LtmPlacement {
             parent_id,
             matched,
         })
+    }
+
+    /// Inbox gardener: re-file inbox documents that now match a concept, using
+    /// their **stored** leaf embeddings (no LLM, no re-distill). Lets a threshold
+    /// change or a newly-added spine branch re-home previously-inboxed docs
+    /// without a full replay. Idempotent — only leaves whose nearest concept is
+    /// now within threshold move; the ambiguous tail stays in the inbox. Returns
+    /// how many documents were re-homed.
+    pub fn garden_inbox(&self) -> Result<usize> {
+        let Some(inbox) = self.repo.get_inbox()? else {
+            return Ok(0);
+        };
+        let inbox_id = inbox.id.expect("stored node has id");
+
+        let mut touched: std::collections::HashSet<i64> = std::collections::HashSet::new();
+        let mut moved = 0;
+        for (leaf_id, embedding) in self.repo.inbox_leaf_embeddings()? {
+            let Some((concept, _dist)) = self
+                .repo
+                .find_similar_concepts(&embedding, self.max_distance, 1)?
+                .into_iter()
+                .next()
+            else {
+                continue; // still no concept within threshold — leave in inbox
+            };
+            let concept_id = concept.id.expect("stored node has id");
+            self.repo.remove_edge(inbox_id, leaf_id)?;
+            self.repo.add_edge(&TreeEdge::new(concept_id, leaf_id))?;
+            touched.insert(concept_id);
+            moved += 1;
+        }
+
+        // Re-roll the inbox (it shrank) and every concept that gained a leaf.
+        if moved > 0 {
+            self.roll_up_from(inbox_id)?;
+            for concept_id in touched {
+                self.roll_up_from(concept_id)?;
+            }
+        }
+        Ok(moved)
     }
 
     /// Tombstone: forget a `dataId` — remove its leaf and re-roll the affected
@@ -155,21 +246,19 @@ impl LtmPlacement {
         Ok(())
     }
 
-    /// A node's rolling summary is the condensed concatenation of its children's
-    /// summaries (leaf children contribute document summaries; concept children
-    /// contribute their own rolled summaries). No children → empty.
+    /// A container node's rolling summary **describes its collection** — a count
+    /// plus the titles of its children — rather than quoting one child's text.
+    ///
+    /// The old behaviour concatenated children's full summaries and truncated to
+    /// 600 chars, so a folder of 79 documents "became" doc #1's summary, and that
+    /// text propagated up to the root (field-report §4). Listing titles keeps the
+    /// summary faithful to the whole set and stops one document from poisoning
+    /// ancestor text. (Placement is unaffected either way: concept match vectors
+    /// come from the curated identity, not this rolling summary.) No children →
+    /// empty.
     fn recompute_summary(&self, node_id: i64) -> Result<()> {
         let children = self.repo.get_children(node_id)?;
-        let parts: Vec<String> = children
-            .into_iter()
-            .map(|c| c.summary)
-            .filter(|s| !s.trim().is_empty())
-            .collect();
-        let new_summary = if parts.is_empty() {
-            String::new()
-        } else {
-            condense(&parts.join("; "), self.max_summary_len)
-        };
+        let new_summary = collection_summary(&children, self.max_summary_len);
 
         if let Some(node) = self.repo.get_node(node_id)?
             && node.summary != new_summary
@@ -188,6 +277,34 @@ fn condense(text: &str, max_len: usize) -> String {
     }
     let head: String = text.chars().take(max_len.saturating_sub(1)).collect();
     format!("{head}…")
+}
+
+/// A short label for a child in a collection summary: its name (leaf title or
+/// concept name), falling back to the first line of its summary.
+fn child_label(node: &TreeNode) -> String {
+    let name = node.name.trim();
+    let raw = if name.is_empty() {
+        node.summary.lines().next().unwrap_or("").trim()
+    } else {
+        name
+    };
+    condense(raw, 60)
+}
+
+/// Build a collection descriptor: `"{n} items: title; title; …"`, bounded to
+/// `max_len` chars. Empty when there are no children.
+fn collection_summary(children: &[TreeNode], max_len: usize) -> String {
+    if children.is_empty() {
+        return String::new();
+    }
+    let noun = if children.len() == 1 { "item" } else { "items" };
+    let labels: Vec<String> = children
+        .iter()
+        .map(child_label)
+        .filter(|l| !l.is_empty())
+        .collect();
+    let body = format!("{} {}: {}", children.len(), noun, labels.join("; "));
+    condense(&body, max_len)
 }
 
 #[cfg(test)]
@@ -224,7 +341,7 @@ mod tests {
 
         let root = repo
             .create_node(
-                &TreeNode::new("Reza", "root seed", TreeNodeKind::Spine),
+                &TreeNode::new("root", "root seed", TreeNodeKind::Spine),
                 None,
             )
             .unwrap();
@@ -250,6 +367,25 @@ mod tests {
         }
     }
 
+    /// A container summary describes the collection (count + child titles), and
+    /// stays bounded — never a quote of one child's full text.
+    #[test]
+    fn test_collection_summary_lists_children() {
+        let children = vec![
+            TreeNode::new("Annual Budget Report", "long body a", TreeNodeKind::Leaf),
+            TreeNode::new("Welcome Newsletter", "long body b", TreeNodeKind::Leaf),
+        ];
+        let s = collection_summary(&children, 600);
+        assert!(s.starts_with("2 items: "), "has a count header: {s}");
+        assert!(s.contains("Annual Budget Report"));
+        assert!(s.contains("Welcome Newsletter"));
+        assert!(!s.contains("long body"), "does not quote child bodies");
+
+        // Singular header + empty case.
+        assert!(collection_summary(&children[..1], 600).starts_with("1 item: "));
+        assert_eq!(collection_summary(&[], 600), "");
+    }
+
     /// A document whose embedding matches a concept attaches under that concept.
     #[test]
     fn test_high_similarity_attaches_under_match() {
@@ -271,6 +407,69 @@ mod tests {
         assert_eq!(parents[0].id, Some(f.concept));
     }
 
+    /// The inbox gardener re-homes an inbox document whose stored embedding now
+    /// matches a concept, leaves an unmatched one alone, and is idempotent.
+    #[test]
+    fn test_garden_inbox_rehomes_matching_leaf_only() {
+        let f = fixture();
+
+        // A doc in the inbox, embedded like the concept → should be re-homed.
+        let match_leaf = f
+            .repo
+            .create_node(
+                &TreeNode::new("job doc", "about the job", TreeNodeKind::Leaf),
+                Some(&[1.0, 0.0, 0.0, 0.0]),
+            )
+            .unwrap();
+        f.repo
+            .create_leaf(&Leaf {
+                tree_node_id: match_leaf,
+                data_id: "doc_match".into(),
+                provenance: provenance(),
+            })
+            .unwrap();
+        f.repo
+            .add_edge(&TreeEdge::new(f.inbox, match_leaf))
+            .unwrap();
+
+        // A doc in the inbox, embedded far from any concept → should stay.
+        let stray_leaf = f
+            .repo
+            .create_node(
+                &TreeNode::new("stray", "unrelated", TreeNodeKind::Leaf),
+                Some(&[0.0, 0.0, 0.0, 1.0]),
+            )
+            .unwrap();
+        f.repo
+            .create_leaf(&Leaf {
+                tree_node_id: stray_leaf,
+                data_id: "doc_stray".into(),
+                provenance: provenance(),
+            })
+            .unwrap();
+        f.repo
+            .add_edge(&TreeEdge::new(f.inbox, stray_leaf))
+            .unwrap();
+
+        let moved = f.svc.garden_inbox().unwrap();
+        assert_eq!(moved, 1, "only the matching leaf is re-homed");
+
+        let mp = f.repo.get_parents(match_leaf).unwrap();
+        assert_eq!(mp.len(), 1);
+        assert_eq!(
+            mp[0].id,
+            Some(f.concept),
+            "matching leaf now under the concept"
+        );
+
+        let sp = f.repo.get_parents(stray_leaf).unwrap();
+        assert_eq!(sp.len(), 1);
+        assert_eq!(sp[0].id, Some(f.inbox), "stray leaf stays in the inbox");
+
+        // Idempotent: a second pass moves nothing.
+        assert_eq!(f.svc.garden_inbox().unwrap(), 0);
+    }
+
     /// A document with no nearby concept falls to the inbox.
     #[test]
     fn test_low_similarity_falls_to_inbox() {
@@ -288,30 +487,39 @@ mod tests {
         assert_eq!(placement.parent_id, f.inbox);
     }
 
-    /// After attaching, the parent concept and its ancestor (root) summaries
-    /// roll up to include the new document.
+    /// After attaching, the parent concept's rolling summary describes its
+    /// document collection (count + the leaf's title), and the ancestor (root)
+    /// summary lists its child branches — a table-of-contents roll-up, not a
+    /// quote of one document.
     #[test]
     fn test_ancestor_summaries_roll_up_on_attach() {
         let f = fixture();
         let doc = DocumentToPlace {
-            name: "metro".into(),
-            summary: "Metro rollout".into(),
+            name: "Metro rollout plan".into(),
+            summary: "Metro rollout details".into(),
             embedding: vec![1.0, 0.0, 0.0, 0.0],
             data_id: "doc_metro".into(),
             provenance: provenance(),
         };
         f.svc.place(&doc).unwrap();
 
+        // The concept now reads as a 1-document collection, titled by the leaf.
         let concept = f.repo.get_node(f.concept).unwrap().unwrap();
         assert!(
-            concept.summary.contains("Metro rollout"),
-            "concept rolled up: {:?}",
+            concept.summary.contains("1 item") && concept.summary.contains("Metro rollout plan"),
+            "concept describes its collection: {:?}",
             concept.summary
         );
+        // The root lists its child branch (by name), not the document's text.
         let root = f.repo.get_node(f.root).unwrap().unwrap();
         assert!(
-            root.summary.contains("Metro rollout"),
-            "root rolled up: {:?}",
+            root.summary.contains("job"),
+            "root lists its branches: {:?}",
+            root.summary
+        );
+        assert!(
+            !root.summary.contains("Metro rollout details"),
+            "one document must not poison the root summary: {:?}",
             root.summary
         );
     }

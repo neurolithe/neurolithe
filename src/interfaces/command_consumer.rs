@@ -68,11 +68,36 @@ impl FeederRewind for NoopRewind {
     }
 }
 
+/// Re-embeds the curated spine after a hard reset. `hard_reset` re-seeds the
+/// spine but seeding creates concept nodes *without* vectors; without this step
+/// placement would be blind and the replay would file every document into the
+/// inbox (the field-report §3 bug, re-introduced by every reset). Implemented by
+/// the daemon, which owns the embedder + LTM store.
+///
+/// `?Send`: the concrete implementor holds the SQLite-backed LTM repo (`!Sync`),
+/// so — like the daemon's other loops — it runs on the single-threaded `LocalSet`.
+#[async_trait(?Send)]
+pub trait SpineEmbedder {
+    async fn embed_spine(&self) -> Result<()>;
+}
+
+/// No-op embedder for when the feeder is disabled (no ingestion → placement not
+/// exercised) or in tests.
+pub struct NoopSpineEmbedder;
+
+#[async_trait(?Send)]
+impl SpineEmbedder for NoopSpineEmbedder {
+    async fn embed_spine(&self) -> Result<()> {
+        Ok(())
+    }
+}
+
 pub struct CommandConsumer {
     consumer: StreamConsumer,
     reset: Arc<ResetService>,
     write: Arc<WriteService>,
     rewind: Arc<dyn FeederRewind>,
+    spine_embedder: Arc<dyn SpineEmbedder>,
     topic: String,
 }
 
@@ -83,6 +108,7 @@ impl CommandConsumer {
         reset: Arc<ResetService>,
         write: Arc<WriteService>,
         rewind: Arc<dyn FeederRewind>,
+        spine_embedder: Arc<dyn SpineEmbedder>,
     ) -> Result<Self> {
         let consumer: StreamConsumer = ClientConfig::new()
             .set("bootstrap.servers", brokers)
@@ -97,6 +123,7 @@ impl CommandConsumer {
             reset,
             write,
             rewind,
+            spine_embedder,
             topic: "memory.command".into(),
         })
     }
@@ -137,8 +164,13 @@ impl CommandConsumer {
         match &command {
             MemoryCommand::ResetSoft | MemoryCommand::ResetHard { .. } => {
                 match self.reset.apply(&command) {
-                    // Hard reset wiped both stores — relearn from the bus.
+                    // Hard reset wiped both stores and re-seeded the spine —
+                    // re-embed it (else placement is blind), THEN rewind so the
+                    // replay files documents under concepts, not the inbox.
                     Ok(ResetKind::Hard) => {
+                        if let Err(e) = self.spine_embedder.embed_spine().await {
+                            eprintln!("[neurolithe] spine re-embed after hard reset failed: {e}");
+                        }
                         if let Err(e) = self.rewind.rewind_to_earliest().await {
                             eprintln!("[neurolithe] feeder rewind after hard reset failed: {e}");
                         }

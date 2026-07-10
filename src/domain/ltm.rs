@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TreeNodeKind {
-    /// Curated backbone — Reza's main branches, seeded once.
+    /// Curated backbone — the user's main branches, seeded once.
     Spine,
     /// AI-created concept node grown under the spine.
     Grown,
@@ -168,9 +168,37 @@ pub trait LtmRepository {
     /// Replace a node's rolling summary (and bump `updated_at`).
     fn update_summary(&self, node_id: i64, summary: &str) -> Result<()>;
 
+    /// Set (or replace) a concept node's placement embedding in `vec_ltm`.
+    /// Concept vectors are the stable anchors placement matches against; they are
+    /// derived from the concept's curated identity, **not** its rolling summary,
+    /// so filing does not drift as documents accumulate.
+    fn set_concept_embedding(&self, node_id: i64, embedding: &[f32]) -> Result<()>;
+
+    /// Concept nodes (`spine`/`grown`) that have no `vec_ltm` embedding yet — the
+    /// ones placement is blind to. The daemon embeds these at startup so the
+    /// spine is a live set of match targets (fixes the "everything falls to the
+    /// inbox" bug: an un-embedded spine can never match).
+    fn concepts_missing_embedding(&self) -> Result<Vec<TreeNode>>;
+
+    /// Placement calibration: for up to `sample` already-embedded document
+    /// leaves, the distance to their **nearest concept** (ignoring any placement
+    /// threshold). Reveals the real distance scale so the placement threshold can
+    /// be tuned to actual data instead of guessed. Read-only; no LLM calls.
+    fn placement_calibration(&self, sample: usize) -> Result<Vec<PlacementProbe>>;
+
     /// Delete a node and everything attached to it: its edges (either
     /// direction), its vector, and its leaf rows. Used by tombstone/forget.
     fn delete_node(&self, node_id: i64) -> Result<()>;
+
+    /// Remove a single parent → child edge (no-op if absent). Used by the inbox
+    /// gardener to re-home a leaf from the inbox to a concept.
+    fn remove_edge(&self, parent_id: i64, child_id: i64) -> Result<()>;
+
+    /// Document leaves currently under the inbox, each with its **stored**
+    /// embedding — so the gardener can re-run placement on them without
+    /// re-embedding (no LLM). Used to re-home the inbox after a threshold change
+    /// or a new spine branch, avoiding a full replay.
+    fn inbox_leaf_embeddings(&self) -> Result<Vec<(i64, Vec<f32>)>>;
 
     /// Seed the curated spine (root + main branches + inbox) once. Idempotent —
     /// a no-op if the tree already has nodes. Re-run after a hard reset.
@@ -189,6 +217,15 @@ pub trait LtmRepository {
 
     /// CT-scan statistics for the LTM tree (slice 9).
     fn ltm_stats(&self) -> Result<LtmStats>;
+}
+
+/// One placement-calibration reading: a document leaf, the nearest concept, and
+/// the raw vector distance between them (the number placement's threshold gates).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PlacementProbe {
+    pub leaf_title: String,
+    pub nearest_concept: String,
+    pub distance: f64,
 }
 
 /// A snapshot of LTM tree health for the metrics CT scan.

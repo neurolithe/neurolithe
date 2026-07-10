@@ -3,6 +3,72 @@
 All notable changes to NeuroLithe are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow SemVer.
 
+## [Unreleased]
+
+Fixes from the 2026-07-09/07-10 real-world retrieval tests
+(`design-docs/NEUROLITHE-FIELD-REPORT.md`).
+
+### Fixed
+
+- **`query_memory` results carried no `data_id` (round 2).** Search hits now
+  include the archive `data_id` (both the MCP `MemoryResult` and the bus
+  `StmEntry`), so an agent goes straight from a hit to fetching the source
+  instead of a second `stm_list` scan — closing the search → trace → fetch loop.
+- **Ranking ignored match quality (round 2).** Results were ordered by decay
+  `relevance_score`, so once reads reinforced several facts to 1.0 the best hit
+  no longer ranked first (a reinforced but weaker keyword match outranked a
+  stronger one). Now ranked by the hybrid vector+keyword score — direct matches
+  first, graph neighbours after, relevance only as a tiebreak.
+- **`query_memory` returned nothing over MCP (tenant mismatch).** The feeder
+  ingests under tenant `jarvis`, but the MCP door defaulted queries to `default`,
+  so the tenant filter dropped every row. The MCP door now routes through the
+  **same `QueryService`** as the `memory.query` bus door and both default to one
+  shared `DEFAULT_TENANT` constant, so they can't drift again.
+- **Hybrid keyword search failed to zero.** The raw query was passed straight to
+  FTS5 (implicit-AND; syntax error on punctuation). It's now sanitized into an
+  OR of quoted terms, so search degrades to keyword-any instead of erroring or
+  over-matching; the keyword leg is skipped (vector-only) when there are no terms.
+- **Document summaries truncated ~2,500 chars.** Anthropic `compress_context`
+  capped output at 1024 tokens; raised to 8192 so long-document summaries
+  complete instead of cutting off mid-word.
+- **Every document landed in the inbox.** The spine was seeded with no
+  embeddings, so placement could never match a concept. The daemon now embeds
+  each concept from its curated identity at startup, and seeding is **additive**
+  with generic personal-life branches (health, home, vehicles, insurance,
+  family, admin, …). The placement distance threshold was then **tuned from
+  measured data** (new `placement_debug` CT-scan tool): real document→concept
+  distances cluster ~1.05 (cosine ~0.4) for normalized `text-embedding-004`, so
+  the threshold is 1.10 — earlier guesses (0.5, 0.85) sat below the whole
+  distribution and filed 100% to the inbox.
+- **Inbox gardener.** A startup pass re-homes inbox documents that now match a
+  concept, using their **stored** embeddings — so a threshold change or a new
+  branch re-files existing docs with **no replay and no LLM calls** (idempotent;
+  the ambiguous tail stays in the inbox). Also exposed as `garden_inbox`.
+- **Hard reset silently re-broke placement.** `hard_reset` re-seeds the spine but
+  seeding leaves concepts un-embedded, so a post-reset replay filed everything
+  back into the inbox. The command consumer now **re-embeds the spine after a
+  hard reset** (before rewinding the feeder), so a reset → replay rebuilds a
+  correctly-filed tree.
+- **Personal data removed.** The seed root node is renamed from a personal name
+  to the generic `"root"`, and all test fixtures use fictional data — the crate
+  is reusable and carries no PII (it is a public repository).
+- **Rolling summaries were degenerate.** A container's summary was one child's
+  truncated text (which propagated to the root). Container summaries now describe
+  the collection (`"N items: title; title; …"`).
+
+### Added
+
+- **`placement_debug` CT-scan tool** — reports, for a sample of document leaves, the distance to their nearest concept, so the placement threshold can be tuned to real embedding distances instead of guessed.
+- **`recall_ltm` MCP tool** — reference-returning search of the permanent archive
+  (dataId + provenance + ancestor concepts), the primary way to find a document.
+- **Leaf titles + `ingested_at`** — leaves get a human title from the summary's
+  first line (not the raw dataId), and `provenance.ingested_at` is populated from
+  the leaf's creation time.
+- **CT-scan ergonomics** — `stm_list` gains `offset` pagination and a `contains`
+  substring filter; `inspect_node` pages children/leaves (`child_limit`/
+  `child_offset`), caps summaries (`summary_max_chars`), and reports
+  `child_count`/`leaf_count`. `feeder_lag: -1` is documented as "unknown".
+
 ## [0.1.2] — 2026-07-03
 
 A large release: NeuroLithe grows from a single decaying store into a **dual

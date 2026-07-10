@@ -497,6 +497,19 @@ fn anthropic_first_text(resp_json: &serde_json::Value) -> String {
         .to_string()
 }
 
+/// Output-token ceiling for **document summarization** (`compress_context`).
+///
+/// The old value (1024, shared with fact extraction) truncated long-document
+/// summaries mid-word around ~2,500 chars — losing the decision-relevant tail
+/// of multi-page reports (field-report §2). A summary is a bounded artifact, so
+/// a generous cap (well within Sonnet's output limit) lets it complete; short
+/// inputs stop early on their own and cost nothing extra.
+const COMPRESS_MAX_TOKENS: u32 = 8192;
+
+/// Output-token ceiling for the small structured calls (fact extraction, CCL
+/// descriptions) whose responses are inherently short.
+const SHORT_MAX_TOKENS: u32 = 1024;
+
 pub struct AnthropicClient {
     client: Client,
     api_key: String,
@@ -543,7 +556,7 @@ impl LlmClient for AnthropicClient {
         // returns a thinking block first).
         let payload = json!({
             "model": self.model,
-            "max_tokens": 1024,
+            "max_tokens": SHORT_MAX_TOKENS,
             "thinking": {"type": "disabled"},
             "system": system_prompt,
             "messages": [
@@ -600,7 +613,7 @@ impl LlmClient for AnthropicClient {
 
         let payload = json!({
             "model": self.model,
-            "max_tokens": 1024,
+            "max_tokens": SHORT_MAX_TOKENS,
             "thinking": {"type": "disabled"},
             "system": system_prompt,
             "messages": [
@@ -633,7 +646,7 @@ impl LlmClient for AnthropicClient {
 
         let payload = json!({
             "model": self.model,
-            "max_tokens": 1024,
+            "max_tokens": COMPRESS_MAX_TOKENS,
             "thinking": {"type": "disabled"},
             "system": system_prompt,
             "messages": [

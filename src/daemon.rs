@@ -27,7 +27,7 @@ use crate::infrastructure::metrics_publisher::MetricsPublisher;
 use crate::infrastructure::pithos_client::PithosClient;
 use crate::infrastructure::repository::SqliteMemoryRepository;
 use crate::interfaces::command_consumer::{
-    CommandConsumer, ConsumerRewind, FeederRewind, NoopRewind,
+    CommandConsumer, ConsumerRewind, FeederRewind, NoopRewind, NoopSpineEmbedder, SpineEmbedder,
 };
 use crate::interfaces::kafka_feeder::KafkaFeeder;
 use crate::interfaces::mcp_server::McpServer;
@@ -37,8 +37,9 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Tenant under which feeder-ingested documents are stored in STM.
-const FEEDER_TENANT: &str = "jarvis";
+/// Tenant under which feeder-ingested documents are stored in STM — the one
+/// shared default so the query doors read what the feeder wrote.
+use crate::domain::models::DEFAULT_TENANT as FEEDER_TENANT;
 
 /// Periodic metrics snapshot -> `memory.metrics`. A composition-root task tying
 /// the monitoring snapshot to the publisher + live feeder stats (so it can
@@ -62,6 +63,28 @@ impl PeriodicTask for MetricsTask {
             }
             Err(e) => eprintln!("[neurolithe] metrics snapshot failed: {e}"),
         }
+    }
+}
+
+/// Re-embeds the curated spine after a hard reset (composition-root wiring of
+/// the application `embed_spine_concepts` step). Mirrors `MetricsTask`: it bridges
+/// the interface-layer `SpineEmbedder` port to the application + infra it needs.
+struct DaemonSpineEmbedder {
+    ltm: Arc<dyn LtmRepository>,
+    llm: Arc<dyn LlmClient>,
+    dim: usize,
+}
+
+#[async_trait(?Send)]
+impl SpineEmbedder for DaemonSpineEmbedder {
+    async fn embed_spine(&self) -> Result<()> {
+        let n =
+            crate::application::ltm_placement::embed_spine_concepts(&self.ltm, &self.llm, self.dim)
+                .await?;
+        if n > 0 {
+            eprintln!("[neurolithe] re-embedded {n} spine concept(s) after hard reset");
+        }
+        Ok(())
     }
 }
 
@@ -111,6 +134,25 @@ pub async fn run(config: AppConfig) -> Result<()> {
         &config.pithos.token,
     ));
 
+    // Give the freshly-seeded spine (and any new branches) placement vectors, so
+    // documents can be filed under a concept instead of all landing in the inbox
+    // (field-report §3). Best-effort: a transient embedder outage must not block
+    // startup — un-embedded concepts are simply retried on the next boot, and the
+    // feeder inboxes documents until then.
+    if config.feeder.enabled {
+        match crate::application::ltm_placement::embed_spine_concepts(
+            &ltm_repo,
+            &llm,
+            config.ltm.vector_dimension,
+        )
+        .await
+        {
+            Ok(0) => {}
+            Ok(n) => eprintln!("[neurolithe] embedded {n} spine concept(s) for placement"),
+            Err(e) => eprintln!("[neurolithe] spine embedding skipped (will retry next boot): {e}"),
+        }
+    }
+
     // --- services ---
     let app = Arc::new(NeurolitheApp::new(
         stm_repo.clone(),
@@ -130,6 +172,20 @@ pub async fn run(config: AppConfig) -> Result<()> {
         config.ltm.vector_dimension,
         FEEDER_TENANT,
     ));
+
+    // Inbox gardener: re-home any inbox documents that now match a concept (e.g.
+    // after a placement-threshold change or a new spine branch), using stored
+    // embeddings — no replay, no LLM. Runs once at startup; idempotent.
+    if config.feeder.enabled {
+        match ingestion.garden_inbox() {
+            Ok(0) => {}
+            Ok(n) => {
+                eprintln!("[neurolithe] inbox gardener re-homed {n} document(s) under concepts")
+            }
+            Err(e) => eprintln!("[neurolithe] inbox gardener failed: {e}"),
+        }
+    }
+
     let reset_token =
         std::env::var("NEUROLITHE_RESET_TOKEN").unwrap_or_else(|_| "RESET-DISABLED".to_string());
     let reset = Arc::new(ResetService::new(
@@ -162,6 +218,19 @@ pub async fn run(config: AppConfig) -> Result<()> {
         None => Arc::new(NoopRewind),
     };
 
+    // After a hard reset the spine is re-seeded but un-embedded — re-embed it so
+    // the replay files documents under concepts, not the inbox. No-op when the
+    // feeder is off (nothing replays to place).
+    let spine_embedder: Arc<dyn SpineEmbedder> = if config.feeder.enabled {
+        Arc::new(DaemonSpineEmbedder {
+            ltm: ltm_repo.clone(),
+            llm: llm.clone(),
+            dim: config.ltm.vector_dimension,
+        })
+    } else {
+        Arc::new(NoopSpineEmbedder)
+    };
+
     // --- command consumer (reset), distinct group id ---
     let command = Arc::new(CommandConsumer::new(
         &config.kafka.brokers,
@@ -169,6 +238,7 @@ pub async fn run(config: AppConfig) -> Result<()> {
         reset,
         write,
         rewind,
+        spine_embedder,
     )?);
 
     // --- query consumer (memory.query -> memory.result), distinct group id ---
@@ -198,7 +268,14 @@ pub async fn run(config: AppConfig) -> Result<()> {
     let metrics_interval = Duration::from_secs(config.metrics.interval_secs);
 
     // --- MCP server (stdio) ---
-    let server = Arc::new(McpServer::new(app, introspection));
+    // Its own QueryService instance (the bus door's was moved into QueryConsumer);
+    // both share the same application recall logic, so the doors can't diverge.
+    let mcp_query = QueryService::new(
+        RetrievalService::new(llm.clone(), stm_repo.clone()),
+        LtmRetrieval::new(ltm_repo.clone()),
+        llm.clone(),
+    );
+    let server = Arc::new(McpServer::new(app, introspection, mcp_query));
 
     // --- spawn all loops on the LocalSet ---
     {
@@ -262,13 +339,25 @@ pub async fn run_mcp(config: AppConfig) -> Result<()> {
     );
     let app = Arc::new(NeurolitheApp::new(
         stm_repo.clone(),
-        llm,
+        llm.clone(),
         config.decay.default_half_life_days,
         config.decay.working_half_life_days(),
     ));
-    let introspection = Arc::new(IntrospectionService::new(stm_repo, ltm_repo));
+    let introspection = Arc::new(IntrospectionService::new(
+        stm_repo.clone(),
+        ltm_repo.clone(),
+    ));
 
-    McpServer::new(app, introspection).run_stdio().await
+    // The one-shot MCP session (the field-test path) gets the same recall
+    // service as the daemon/bus door — STM hybrid search + reference-returning
+    // LTM recall, defaulting to the JARVIS tenant.
+    let query = QueryService::new(
+        RetrievalService::new(llm.clone(), stm_repo),
+        LtmRetrieval::new(ltm_repo),
+        llm,
+    );
+
+    McpServer::new(app, introspection, query).run_stdio().await
 }
 
 /// Resolve on Ctrl-C (SIGINT) or, on Unix, SIGTERM — so `docker stop` shuts the
