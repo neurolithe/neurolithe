@@ -17,7 +17,10 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
-RUN cargo build --release --bin neurolithe && strip target/release/neurolithe
+# The JARVIS image is the full daemon, so build with the `kafka` feature (pulls
+# in rdkafka). The published standalone binaries build WITHOUT this feature and
+# need none of the librdkafka toolchain above.
+RUN cargo build --release --features kafka --bin neurolithe && strip target/release/neurolithe
 
 # ── runtime ──────────────────────────────────────────────────────────────────
 FROM debian:bookworm-slim AS runtime

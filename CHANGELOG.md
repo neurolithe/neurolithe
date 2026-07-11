@@ -3,10 +3,21 @@
 All notable changes to NeuroLithe are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow SemVer.
 
-## [Unreleased]
+## [0.2.0] — 2026-07-10
 
-Fixes from the 2026-07-09/07-10 real-world retrieval tests
-(`design-docs/NEUROLITHE-FIELD-REPORT.md`).
+A reliability release driven by real-world MCP testing: search actually works
+now, and NeuroLithe is **standalone by default** — install the binary, run
+`neurolithe mcp`, and its MCP server is ready with no Kafka or broker.
+
+### Changed
+
+- **Standalone by default; Kafka is opt-in.** The default build is just the
+  embedded stores + the MCP server — **no `rdkafka`/librdkafka**, so it compiles
+  and installs cleanly on every platform (fixing the release build that failed on
+  the Kafka dependency, and restoring the prebuilt **Windows** binary). The full
+  JARVIS daemon (feeder + `memory.command`/`memory.query` + metrics) is now
+  behind a `kafka` cargo feature (`cargo build --release --features kafka`); the
+  Docker image enables it. `neurolithe mcp` is the standalone entry point.
 
 ### Fixed
 
@@ -132,6 +143,7 @@ can reconstruct what it just did.
 
 - First release.
 
+[0.2.0]: https://github.com/neurolithe/neurolithe/releases/tag/v0.2.0
 [0.1.2]: https://github.com/neurolithe/neurolithe/releases/tag/v0.1.2
 [0.1.1]: https://github.com/neurolithe/neurolithe/releases/tag/v0.1.1
 [0.1.0]: https://github.com/neurolithe/neurolithe/releases/tag/v0.1.0
