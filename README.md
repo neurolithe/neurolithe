@@ -38,8 +38,10 @@ curl -fsSL https://raw.githubusercontent.com/neurolithe/neurolithe/master/instal
 > [!NOTE]
 > This automatically downloads the latest binary (macOS Intel/Apple-Silicon, Linux x86_64), creates config files, prompts for your LLM API key, and provides a ready-to-use MCP configuration snippet.
 
-> [!IMPORTANT]
-> **Windows:** there is no prebuilt Windows binary yet — the Kafka client (`rdkafka`) doesn't build cleanly on MSVC. On Windows, use **WSL** with the command above, run the **Docker image** (`docker compose up`), or build from source in a Unix-like environment.
+> [!NOTE]
+> The published binaries (macOS Intel/Apple-Silicon, Linux x86_64, **Windows**)
+> are the **standalone** build — just the embedded stores + MCP server, no Kafka.
+> Nothing to install or run besides the binary.
 
 <details>
 <summary><b>Install from source</b></summary>
@@ -50,8 +52,12 @@ Ensure you have [Rust](https://rustup.rs/) installed:
 ```bash
 git clone https://github.com/neurolithe/neurolithe.git
 cd neurolithe
-cargo install --path .
+cargo install --path .                    # standalone MCP server (default)
+cargo install --path . --features kafka   # + the Kafka event-driven daemon
 ```
+
+The default build needs no Kafka/`librdkafka` toolchain — only a C compiler for
+bundled SQLite. Add `--features kafka` only if you want the daemon.
 
 </details>
 
@@ -74,23 +80,31 @@ Add NeuroLithe to your MCP client (*Claude Desktop, Cursor, etc.*). The install 
 ```
 
 > [!NOTE]
-> The `mcp` subcommand runs the one-shot **MCP server** over STDIO. Running the
-> binary with **no arguments** starts the full **daemon** instead (Kafka feeder +
-> bus memory API) — see [Run modes](#-run-modes).
+> The `mcp` subcommand runs the **MCP server** over STDIO — this is the default,
+> standalone mode. The event-driven **daemon** is an opt-in build
+> (`--features kafka`) — see [Run modes](#-run-modes).
 
 ## 🔀 Run modes
 
-NeuroLithe ships one binary with two subcommands:
+NeuroLithe is **standalone by default** — the MCP server needs no Kafka:
 
 ```bash
-neurolithe mcp      # one-shot MCP server over STDIO (embedded agent memory)
+neurolithe mcp      # MCP server over STDIO (embedded agent memory) — always available
 neurolithe daemon   # long-running: MCP + Kafka feeder + bus memory API + scheduler
+                    #   (only in builds compiled with --features kafka)
 ```
 
-- **`mcp`** — the drop-in option for an MCP client (Claude Desktop, Cursor, …). No Kafka required; just `[llm]` + `[stm]` + `[ltm]` config.
-- **`daemon`** — the event-driven brain: consumes `document.completed`, distills each item into STM + LTM, answers `memory.query`→`memory.result`, applies `memory.command` (remember/forget/reset), and publishes a `memory.metrics` CT-scan. Needs a Kafka broker (see [`docker-compose.yml`](docker-compose.yml)).
+- **`mcp`** — the drop-in option for an MCP client (Claude Desktop, Cursor, …).
+  No Kafka, no broker; just `[llm]` + `[stm]` + `[ltm]` config. This is what the
+  published binaries do.
+- **`daemon`** — the event-driven brain: consumes `document.completed`, distills
+  each item into STM + LTM, answers `memory.query`→`memory.result`, applies
+  `memory.command` (remember/forget/reset), and publishes a `memory.metrics`
+  CT-scan. Needs a Kafka broker (see [`docker-compose.yml`](docker-compose.yml))
+  and a build with `--features kafka`.
 
-> Running the binary with **no subcommand** starts the **daemon**. MCP clients must pass `["mcp"]`.
+> A standalone build runs only `neurolithe mcp`; invoking it without `mcp` prints
+> a hint. A `--features kafka` build starts the daemon when run with no subcommand.
 
 ## ✨ Features
 
@@ -115,7 +129,7 @@ NeuroLithe is built for speed, safety, and conciseness using modern technologies
 - **Vector Search:** `sqlite-vec` & FTS5 — Powering hybrid search (semantic vector embeddings + BM25 full-text search) natively in SQL.
 - **Async Runtime:** `tokio` — Handling concurrent operations efficiently.
 - **LLM Integration:** `reqwest` & `serde` — Provider-agnostic clients for OpenAI, Google (Gemini / Vertex AI), Anthropic Claude, and local OpenAI-compatible endpoints (Ollama). Chat and embedding providers are configured independently.
-- **Event Backbone (daemon):** `rdkafka` — Consumes `document.completed` and serves a request/reply memory API over Kafka.
+- **Event Backbone (daemon, optional):** `rdkafka` behind the `kafka` feature — consumes `document.completed` and serves a request/reply memory API over Kafka. Not compiled into the standalone build.
 - **Protocol:** [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) — Operating seamlessly as an intelligent MCP server over standard input/output (STDIO).
 
 ## 🤝 Contributing

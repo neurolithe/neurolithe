@@ -131,9 +131,14 @@ impl IngestionService {
 
         let distillate = self.distiller.distill(&texts.join("\n\n")).await?;
 
+        // A human-readable leaf title (first heading/line of the summary), so
+        // listings and rolling summaries read as titles, not raw dataIds
+        // (field-report §5). Falls back to the dataId when the summary is blank.
+        let title = derive_title(&distillate.summary, &document_id);
+
         // LTM: file a permanent leaf under the best concept (or inbox).
         let placement = self.placement.place(&DocumentToPlace {
-            name: document_id.clone(),
+            name: title,
             summary: distillate.summary.clone(),
             embedding: distillate.embedding.clone(),
             data_id: document_id.clone(),
@@ -174,11 +179,39 @@ impl IngestionService {
         })
     }
 
+    /// Re-home inbox documents under concepts using their stored embeddings (no
+    /// LLM) — e.g. after a placement-threshold change or a new spine branch.
+    /// Returns how many were re-filed.
+    pub fn garden_inbox(&self) -> Result<usize> {
+        self.placement.garden_inbox()
+    }
+
     /// Tombstone: forget a document from BOTH stores.
     pub async fn forget(&self, document_id: &str) -> Result<()> {
         self.placement.forget(document_id)?;
         self.stm.delete_nodes_by_data_id(document_id)?;
         Ok(())
+    }
+}
+
+/// Derive a short leaf title from a distilled summary: its first non-empty line,
+/// stripped of a leading Markdown heading marker and capped to ~80 chars. Falls
+/// back to `fallback` (the dataId) when the summary has no usable text.
+fn derive_title(summary: &str, fallback: &str) -> String {
+    let line = summary
+        .lines()
+        .map(|l| l.trim().trim_start_matches('#').trim())
+        .find(|l| !l.is_empty());
+    match line {
+        Some(l) => {
+            let capped: String = l.chars().take(80).collect();
+            if l.chars().count() > 80 {
+                format!("{capped}…")
+            } else {
+                capped
+            }
+        }
+        None => fallback.to_string(),
     }
 }
 
@@ -315,6 +348,42 @@ mod tests {
             }
         );
         assert!(h.ltm.get_node_by_data_id("grp_2").unwrap().is_none());
+    }
+
+    /// `derive_title` takes the first meaningful line (stripping a Markdown
+    /// heading) and falls back to the dataId when the summary is blank.
+    #[test]
+    fn test_derive_title() {
+        assert_eq!(
+            derive_title("# Annual Budget Report\n\nBody...", "grp_x"),
+            "Annual Budget Report"
+        );
+        assert_eq!(derive_title("   \n\n", "grp_x"), "grp_x");
+        let long = "x".repeat(200);
+        let title = derive_title(&long, "grp_x");
+        assert!(title.chars().count() <= 81 && title.ends_with('…'));
+    }
+
+    /// The leaf's tree-node name is a human title (not the raw dataId), and its
+    /// provenance carries a populated `ingested_at`.
+    #[tokio::test]
+    async fn test_leaf_gets_title_and_ingested_at() {
+        let h = harness(false);
+        h.svc.ingest(&event("grp_title")).await.unwrap();
+
+        let leaf = h.ltm.get_node_by_data_id("grp_title").unwrap().unwrap();
+        // StubLlm summarises to "summary[N]" → that becomes the title (not the id).
+        assert!(leaf.name.starts_with("summary["));
+        assert_ne!(
+            leaf.name, "grp_title",
+            "leaf name is a title, not the dataId"
+        );
+
+        let stored = h.ltm.get_leaf(leaf.id.unwrap()).unwrap().unwrap();
+        assert!(
+            stored.provenance.ingested_at.is_some(),
+            "ingest time is populated from the leaf's created_at"
+        );
     }
 
     /// An event with neither groupId nor dataId is a bad event (the feeder

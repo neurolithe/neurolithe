@@ -17,24 +17,27 @@ jobs:
     strategy:
       # Don't let one target's failure cancel the others — ship whatever builds.
       fail-fast: false
+      # Published binaries are the STANDALONE build (default features): embedded
+      # stores + MCP server, no Kafka/rdkafka — so they build on every target
+      # (only bundled SQLite's C, which is portable). The Kafka daemon ships via
+      # the Docker image (`--features kafka`).
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             artifact: neurolithe
-          # `macos-latest` is Apple Silicon (arm64); rdkafka-sys builds its
-          # vendored C lib for the runner arch, so an x86_64 cross-build there
-          # link-fails. Build x86_64 on the Intel runner (macos-13) instead.
+          # Build x86_64 on the Intel runner (macos-13); macos-latest is arm64.
           - target: x86_64-apple-darwin
             os: macos-13
             artifact: neurolithe
           - target: aarch64-apple-darwin
             os: macos-latest
             artifact: neurolithe
-          # NOTE: no prebuilt Windows target — rdkafka-sys (added in V2) builds
-          # its vendored librdkafka via a Unix `configure` that fails on Windows
-          # MSVC. Windows users build from source (WSL) or run the Docker image.
-          # Restore this target once rdkafka is feature-gated or `cmake-build`ing.
+          # Windows is back now that rdkafka is feature-gated — the standalone
+          # build has no librdkafka, and bundled SQLite builds fine on MSVC.
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            artifact: neurolithe.exe
 
     steps:
       - uses: actions/checkout@v4
@@ -53,6 +56,8 @@ jobs:
             target
           key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
+      # Default features = standalone (no Kafka). Do NOT add --features kafka
+      # here, or Windows/other targets regain the librdkafka toolchain problem.
       - name: Build release binary
         run: cargo build --release --target ${{ matrix.target }}
 

@@ -4,6 +4,32 @@ use crate::infrastructure::database::db_size_bytes;
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, params};
 
+/// Turn a raw user query into a **safe** FTS5 MATCH expression, or `None` if it
+/// carries no searchable terms.
+///
+/// Two problems this solves (field-report §1): (1) passing the raw string to
+/// `fts5 MATCH` treats it as an FTS query *expression*, so any punctuation
+/// (`:`, `-`, `(`, `"`, `.`) is a syntax error that fails the whole hybrid
+/// search; (2) bare space-separated tokens are implicitly AND-ed, so one word
+/// the document happens not to contain yields zero rows. We tokenize on
+/// non-alphanumerics, quote each token as a phrase (neutralizing operators), and
+/// OR-join them — so search degrades to keyword-any, never to an error or an
+/// over-strict all-terms match. Vector recall runs regardless; this only governs
+/// the keyword leg.
+fn fts_or_query(raw: &str) -> Option<String> {
+    let terms: Vec<String> = raw
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .take(32) // bound the expression size for pathological inputs
+        .map(|t| format!("\"{t}\""))
+        .collect();
+    if terms.is_empty() {
+        None
+    } else {
+        Some(terms.join(" OR "))
+    }
+}
+
 pub struct SqliteMemoryRepository {
     conn: Connection,
 }
@@ -170,13 +196,21 @@ impl MemoryRepository for SqliteMemoryRepository {
             )
         };
 
-        let query = "
+        // The keyword leg is included only when the query yields safe FTS terms;
+        // otherwise the search is vector-only (still returns nearest neighbors).
+        let fts = fts_or_query(query_text);
+        let keyword_leg = if fts.is_some() {
+            "UNION ALL
+                SELECT rowid as node_id, rank as score FROM fts_nodes WHERE fts_nodes MATCH ?2"
+        } else {
+            ""
+        };
+        let query = format!(
+            "
             WITH hybrid_matches AS (
                 -- Semantic
                 SELECT node_id, distance as score FROM vec_nodes WHERE embedding MATCH ?1 AND k = 10
-                UNION ALL
-                -- Keyword
-                SELECT rowid as node_id, rank as score FROM fts_nodes WHERE fts_nodes MATCH ?2
+                {keyword_leg}
             ),
             ranked_matches AS (
                 SELECT node_id, SUM(score) as combined_score FROM hybrid_matches GROUP BY node_id ORDER BY combined_score LIMIT ?3
@@ -187,12 +221,18 @@ impl MemoryRepository for SqliteMemoryRepository {
             JOIN ranked_matches rm ON n.id = rm.node_id
             WHERE n.tenant_id = ?4 AND n.status = 'active'
             ORDER BY rm.combined_score ASC;
-        ";
+        "
+        );
 
-        let mut stmt = self.conn.prepare(query)?;
+        let mut stmt = self.conn.prepare(&query)?;
 
         let node_iter = stmt.query_map(
-            params![embedding_bytes, query_text, limit as i64, tenant_id.0],
+            params![
+                embedding_bytes,
+                fts.unwrap_or_default(),
+                limit as i64,
+                tenant_id.0
+            ],
             |row| {
                 let payload_str: String = row.get(3)?;
                 Ok(MemoryNode {
@@ -236,12 +276,21 @@ impl MemoryRepository for SqliteMemoryRepository {
             )
         };
 
-        // Blueprint section 2.5: Hybrid + Graph + Temporal query
-        let query = "
+        // Blueprint section 2.5: Hybrid + Graph + Temporal query.
+        // Keyword leg is included only when the query yields safe FTS terms
+        // (see `fts_or_query`); otherwise vector recall carries the search alone.
+        let fts = fts_or_query(query_text);
+        let keyword_leg = if fts.is_some() {
+            "UNION ALL
+                SELECT rowid as node_id, rank as score FROM fts_nodes WHERE fts_nodes MATCH ?2"
+        } else {
+            ""
+        };
+        let query = format!(
+            "
             WITH hybrid_matches AS (
                 SELECT node_id, distance as score FROM vec_nodes WHERE embedding MATCH ?1 AND k = 10
-                UNION ALL
-                SELECT rowid as node_id, rank as score FROM fts_nodes WHERE fts_nodes MATCH ?2
+                {keyword_leg}
             ),
             ranked_matches AS (
                 SELECT node_id, SUM(score) as combined_score FROM hybrid_matches GROUP BY node_id ORDER BY combined_score LIMIT 5
@@ -265,21 +314,29 @@ impl MemoryRepository for SqliteMemoryRepository {
                 n.id, n.payload, n.ccl, n.relevance_score, n.updated_at
             FROM nodes n
             JOIN graph_context gc ON n.id = gc.node_id
+            LEFT JOIN ranked_matches rm ON rm.node_id = n.id
             WHERE n.tenant_id = ?3 AND n.status = 'active'
               AND (n.created_at >= ?5 OR ?5 IS NULL)
               AND (n.created_at <= ?6 OR ?6 IS NULL)
               AND n.ccl IN (SELECT value FROM json_each(?7))
-            ORDER BY n.relevance_score DESC
+            -- Rank by SEARCH quality, not decay score: direct hybrid matches
+            -- first (ordered by their combined vector+keyword score), then the
+            -- 1-hop graph neighbours, with relevance as a final tiebreak. The old
+            -- `ORDER BY relevance_score DESC` ignored match quality entirely, so
+            -- once reads boosted several facts to 1.0 the best match no longer
+            -- ranked first (field-report round 2, ranking nit).
+            ORDER BY (rm.combined_score IS NULL), rm.combined_score ASC, n.relevance_score DESC
             LIMIT ?4;
-        ";
+        "
+        );
 
-        let mut stmt = self.conn.prepare(query)?;
+        let mut stmt = self.conn.prepare(&query)?;
 
         let rows: Vec<(i64, String, String, f64, String)> = stmt
             .query_map(
                 params![
                     embedding_bytes,
-                    query_text,
+                    fts.unwrap_or_default(),
                     tenant_id.0,
                     limit as i64,
                     time_filter.after,
@@ -314,6 +371,11 @@ impl MemoryRepository for SqliteMemoryRepository {
                 .and_then(|f| f.as_str())
                 .unwrap_or("")
                 .to_string();
+            // Surface the archive reference so a hit can be traced/fetched.
+            let data_id = payload
+                .get("dataId")
+                .and_then(|d| d.as_str())
+                .map(|s| s.to_string());
 
             // Get 1-hop connections for this node
             let mut edge_stmt = self.conn.prepare(
@@ -359,6 +421,7 @@ impl MemoryRepository for SqliteMemoryRepository {
                 ccl,
                 last_updated: updated_at,
                 connections,
+                data_id,
                 context_key: None,
             });
         }
@@ -381,7 +444,8 @@ impl MemoryRepository for SqliteMemoryRepository {
         // never listed as turns). Old flat notes have no `kind` → treated as
         // turns. An empty ccl filter matches any layer.
         let mut stmt = self.conn.prepare(
-            "SELECT id, json_extract(payload, '$.fact'), ccl, updated_at, context_key
+            "SELECT id, json_extract(payload, '$.fact'), ccl, updated_at, context_key,
+                    json_extract(payload, '$.dataId')
              FROM nodes
              WHERE tenant_id = ?1
                AND status = 'active'
@@ -405,6 +469,7 @@ impl MemoryRepository for SqliteMemoryRepository {
                             ccl: row.get(2)?,
                             last_updated: row.get(3)?,
                             connections: Vec::new(),
+                            data_id: row.get(5)?,
                             context_key: row.get(4)?,
                         },
                     ))
@@ -671,29 +736,37 @@ impl MemoryRepository for SqliteMemoryRepository {
     fn list_node_summaries(
         &self,
         limit: usize,
+        offset: usize,
         status: Option<&str>,
+        contains: Option<&str>,
     ) -> Result<Vec<crate::domain::ports::StmNodeSummary>> {
-        // Most-relevant first; optional status filter. NULL status filter via
-        // `?1 IS NULL` keeps a single prepared statement.
+        // Most-relevant first; optional status + substring filters, paginated.
+        // NULL-guarded filters (`?N IS NULL OR …`) keep a single prepared
+        // statement. `contains` matches the fact text case-insensitively (LIKE is
+        // case-insensitive for ASCII); `%` in the term is passed through as-is.
         let mut stmt = self.conn.prepare(
             "SELECT json_extract(payload, '$.fact'), status, relevance_score, support_count,
                     ccl, last_accessed_at, json_extract(payload, '$.dataId')
              FROM nodes
              WHERE (?1 IS NULL OR status = ?1)
+               AND (?2 IS NULL OR json_extract(payload, '$.fact') LIKE '%' || ?2 || '%')
              ORDER BY relevance_score DESC, last_accessed_at DESC
-             LIMIT ?2",
+             LIMIT ?3 OFFSET ?4",
         )?;
-        let rows = stmt.query_map(params![status, limit as i64], |row| {
-            Ok(crate::domain::ports::StmNodeSummary {
-                fact: row.get::<_, Option<String>>(0)?.unwrap_or_default(),
-                status: row.get(1)?,
-                relevance_score: row.get(2)?,
-                support_count: row.get(3)?,
-                ccl: row.get(4)?,
-                last_accessed_at: row.get(5)?,
-                data_id: row.get(6)?,
-            })
-        })?;
+        let rows = stmt.query_map(
+            params![status, contains, limit as i64, offset as i64],
+            |row| {
+                Ok(crate::domain::ports::StmNodeSummary {
+                    fact: row.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                    status: row.get(1)?,
+                    relevance_score: row.get(2)?,
+                    support_count: row.get(3)?,
+                    ccl: row.get(4)?,
+                    last_accessed_at: row.get(5)?,
+                    data_id: row.get(6)?,
+                })
+            },
+        )?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
@@ -772,10 +845,132 @@ impl MemoryRepository for SqliteMemoryRepository {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::models::SessionId;
+    use crate::domain::models::{SessionId, TimeFilter};
     use crate::infrastructure::database::init_db;
     use crate::infrastructure::schema::init_schema;
     use serde_json::json;
+
+    /// The FTS sanitizer OR-joins quoted terms (any-term match, not all-terms)
+    /// and neutralizes punctuation that would otherwise be an FTS5 syntax error.
+    #[test]
+    fn test_fts_or_query_sanitizes() {
+        assert_eq!(
+            fts_or_query("annual budget report"),
+            Some("\"annual\" OR \"budget\" OR \"report\"".to_string())
+        );
+        // Punctuation (colons, parens, hyphens, quotes) becomes delimiters, so no
+        // FTS operator leaks through to cause a syntax error.
+        assert_eq!(
+            fts_or_query("Acme-Corp (2022): \"report\""),
+            Some("\"Acme\" OR \"Corp\" OR \"2022\" OR \"report\"".to_string())
+        );
+        // No alphanumeric terms → None (keyword leg is skipped, vector-only).
+        assert_eq!(fts_or_query("   -:()  "), None);
+    }
+
+    /// A punctuation-heavy query must not error the hybrid search, and a query
+    /// lifted verbatim from a stored fact must find it (the field-report scenario).
+    #[test]
+    fn test_query_with_graph_is_punctuation_safe_and_finds_verbatim() {
+        let repo = setup_mem_repo();
+        let t = TenantId("jarvis".into());
+        let node = MemoryNode {
+            id: None,
+            tenant_id: t.clone(),
+            source_episode_id: None,
+            payload: json!({"fact": "Maple Court Annual Budget Report (Cedar Advisors, 2022)"}),
+            status: "active".into(),
+            ccl: "reality".into(),
+            is_explicit: true,
+            support_count: 1,
+            relevance_score: 0.99,
+            context_key: None,
+        };
+        repo.store_node(&node, &vec![0.1f32; 1536]).unwrap();
+
+        // A punctuation-laden query must not error, and must match on keywords.
+        let out = repo
+            .query_with_graph(
+                "budget report: Cedar-Advisors (2022)",
+                &vec![0.9f32; 1536],
+                &t,
+                &TimeFilter::default(),
+                &["reality".to_string()],
+                10,
+            )
+            .unwrap();
+        assert!(
+            out.iter().any(|r| r.fact.contains("Budget Report")),
+            "keyword leg should surface the verbatim fact"
+        );
+        // The archive reference is surfaced so the hit can be traced/fetched.
+        let hit = out
+            .iter()
+            .find(|r| r.fact.contains("Budget Report"))
+            .unwrap();
+        assert_eq!(hit.data_id.as_deref(), None, "no dataId in this fixture");
+    }
+
+    /// Results rank by SEARCH quality, not decay score: a stronger keyword match
+    /// outranks a weaker one even when the weaker one was reinforced to a higher
+    /// relevance_score. Also verifies `data_id` is surfaced from the payload.
+    #[test]
+    fn test_ranking_prefers_match_quality_and_surfaces_data_id() {
+        let repo = setup_mem_repo();
+        let t = TenantId("jarvis".into());
+
+        // Strong match: contains both query terms; modest relevance.
+        let strong = MemoryNode {
+            id: None,
+            tenant_id: t.clone(),
+            source_episode_id: None,
+            payload: json!({"fact": "Annual budget reserve fund", "dataId": "doc_dep"}),
+            status: "active".into(),
+            ccl: "reality".into(),
+            is_explicit: true,
+            support_count: 1,
+            relevance_score: 0.5,
+            context_key: None,
+        };
+        // Weak match (no query terms) but reinforced to the top relevance score.
+        let weak = MemoryNode {
+            id: None,
+            tenant_id: t.clone(),
+            source_episode_id: None,
+            payload: json!({"fact": "Newsletter holiday hours", "dataId": "doc_news"}),
+            status: "active".into(),
+            ccl: "reality".into(),
+            is_explicit: true,
+            support_count: 1,
+            relevance_score: 1.0,
+            context_key: None,
+        };
+        // Near-identical embeddings so the keyword leg — not vector distance —
+        // decides the order.
+        repo.store_node(&strong, &vec![0.5f32; 1536]).unwrap();
+        repo.store_node(&weak, &vec![0.5f32; 1536]).unwrap();
+
+        let out = repo
+            .query_with_graph(
+                "budget reserve",
+                &vec![0.5f32; 1536],
+                &t,
+                &TimeFilter::default(),
+                &["reality".to_string()],
+                10,
+            )
+            .unwrap();
+
+        assert_eq!(
+            out[0].fact, "Annual budget reserve fund",
+            "the stronger keyword match ranks first despite lower relevance_score"
+        );
+        assert_eq!(
+            out[0].data_id.as_deref(),
+            Some("doc_dep"),
+            "the archive reference is surfaced on the hit"
+        );
+    }
 
     fn setup_mem_repo() -> Box<dyn MemoryRepository> {
         let conn = init_db(None as Option<&String>).unwrap();

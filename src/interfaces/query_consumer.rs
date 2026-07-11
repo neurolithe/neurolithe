@@ -333,7 +333,7 @@ mod tests {
     #[tokio::test]
     async fn stm_scope_returns_facts_and_no_ltm() {
         let f = fixture(false);
-        seed_stm_fact(&f.stm, "jarvis", "Reza likes tea");
+        seed_stm_fact(&f.stm, "jarvis", "User likes tea");
 
         let reply = f
             .consumer
@@ -342,14 +342,14 @@ mod tests {
 
         assert_eq!(reply.status, ReplyStatus::Ok);
         assert_eq!(reply.stm.len(), 1);
-        assert_eq!(reply.stm[0].fact, "Reza likes tea");
+        assert_eq!(reply.stm[0].fact, "User likes tea");
         assert!(reply.ltm.is_empty());
     }
 
     #[tokio::test]
     async fn tenant_defaults_to_jarvis_and_isolates_other_tenants() {
         let f = fixture(false);
-        seed_stm_fact(&f.stm, "jarvis", "Reza likes tea");
+        seed_stm_fact(&f.stm, "jarvis", "User likes tea");
 
         // Omitting tenant → parses to "jarvis" → finds the fact.
         let defaulted: MemoryQuery = serde_json::from_value(serde_json::json!({
@@ -474,7 +474,7 @@ mod tests {
     #[tokio::test]
     async fn ltm_scope_skips_stm_and_embeds_the_query() {
         let f = fixture(false);
-        seed_stm_fact(&f.stm, "jarvis", "Reza likes tea");
+        seed_stm_fact(&f.stm, "jarvis", "User likes tea");
 
         let reply = f
             .consumer
@@ -490,7 +490,7 @@ mod tests {
     #[tokio::test]
     async fn both_scope_runs_stm_and_ltm() {
         let f = fixture(false);
-        seed_stm_fact(&f.stm, "jarvis", "Reza likes tea");
+        seed_stm_fact(&f.stm, "jarvis", "User likes tea");
 
         let reply = f
             .consumer
@@ -528,7 +528,7 @@ mod tests {
     #[tokio::test]
     async fn ltm_via_stm_seeds_ltm_with_stm_fact_texts() {
         let f = fixture(false);
-        seed_stm_fact(&f.stm, "jarvis", "Reza likes tea");
+        seed_stm_fact(&f.stm, "jarvis", "User likes tea");
 
         let reply = f
             .consumer
@@ -536,11 +536,11 @@ mod tests {
             .await;
 
         // The recalled STM fact is reported as the seed…
-        assert_eq!(reply.seeded_by, vec!["Reza likes tea".to_string()]);
+        assert_eq!(reply.seeded_by, vec!["User likes tea".to_string()]);
         // …and the LTM seed embedding folds the query together with that fact.
         let seed_input = f.llm.embed_inputs().last().cloned().unwrap();
         assert!(seed_input.contains("beverage"));
-        assert!(seed_input.contains("Reza likes tea"));
+        assert!(seed_input.contains("User likes tea"));
     }
 
     #[tokio::test]

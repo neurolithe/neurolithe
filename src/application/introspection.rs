@@ -17,6 +17,44 @@ pub struct NodeDetail {
     pub parents: Vec<NodeView>,
     pub children: Vec<NodeView>,
     pub leaves: Vec<LeafRef>,
+    /// Total children before the page window (so a client knows there's more).
+    pub child_count: usize,
+    /// Total document leaves before the page window.
+    pub leaf_count: usize,
+}
+
+/// Paging + verbosity controls for [`IntrospectionService::inspect_node`], so a
+/// fat node (e.g. the inbox with dozens of leaves) doesn't return one giant blob
+/// (field-report §5). Children and leaves share the window; summaries are capped.
+#[derive(Debug, Clone, Copy)]
+pub struct LeafPage {
+    /// Max children/leaves to return. `None` → [`DEFAULT_CHILD_LIMIT`].
+    pub child_limit: Option<usize>,
+    /// How many children/leaves to skip (pagination).
+    pub child_offset: usize,
+    /// Cap each node summary to this many chars. `None` → [`DEFAULT_SUMMARY_MAX_CHARS`];
+    /// pass a large value (or `0`) for full summaries.
+    pub summary_max_chars: Option<usize>,
+}
+
+/// Default page size for `inspect_node` children/leaves when unspecified.
+const DEFAULT_CHILD_LIMIT: usize = 50;
+/// Default summary cap for `inspect_node` — headlines by default; opt into more.
+const DEFAULT_SUMMARY_MAX_CHARS: usize = 200;
+
+/// Truncate a summary to `max` chars on a char boundary (0 = unbounded).
+fn cap_summary(s: &str, max: usize) -> String {
+    if max == 0 || s.chars().count() <= max {
+        return s.to_string();
+    }
+    let head: String = s.chars().take(max.saturating_sub(1)).collect();
+    format!("{head}…")
+}
+
+/// Apply the summary cap to a node view.
+fn capped(mut n: NodeView, max: usize) -> NodeView {
+    n.summary = cap_summary(&n.summary, max);
+    n
 }
 
 /// Where a document lives in the brain: its LTM leaf + ancestor branch, and how
@@ -38,6 +76,10 @@ pub struct HealthView {
     pub ltm_orphan_leaves: i64,
     pub stm_db_bytes: i64,
     pub ltm_db_bytes: i64,
+    /// Feeder consumer lag (messages behind the log head). **`-1` means unknown**
+    /// — the on-demand introspection path has no live consumer handle; the true
+    /// lag is published on the `memory.metrics` stream by the running daemon. A
+    /// non-negative value is a real lag (0 = caught up).
     pub feeder_lag: i64,
     pub feeder_errors: u64,
 }
@@ -66,9 +108,18 @@ impl IntrospectionService {
         self.monitoring.snapshot(&RuntimeStats::unknown())
     }
 
-    /// STM facts, most-relevant first, optionally filtered by status.
-    pub fn stm_list(&self, limit: usize, status: Option<&str>) -> Result<Vec<StmNodeSummary>> {
-        self.stm.list_node_summaries(limit, status)
+    /// STM facts, most-relevant first, with pagination and optional status +
+    /// substring filters (field-report §5 — so a client can find facts without
+    /// dumping the whole store).
+    pub fn stm_list(
+        &self,
+        limit: usize,
+        offset: usize,
+        status: Option<&str>,
+        contains: Option<&str>,
+    ) -> Result<Vec<StmNodeSummary>> {
+        self.stm
+            .list_node_summaries(limit, offset, status, contains)
     }
 
     /// Top `depth` concept layers of the tree.
@@ -76,37 +127,52 @@ impl IntrospectionService {
         self.retrieval.map(depth)
     }
 
-    /// One LTM node with its parents, children, and document leaves.
-    pub fn inspect_node(&self, id: i64) -> Result<Option<NodeDetail>> {
+    /// One LTM node with its parents, children, and document leaves — paged and
+    /// summary-capped per [`LeafPage`] so a fat node returns a bounded response.
+    pub fn inspect_node(&self, id: i64, page: LeafPage) -> Result<Option<NodeDetail>> {
         let Some(node) = self.ltm.get_node(id)? else {
             return Ok(None);
         };
+        let limit = page.child_limit.unwrap_or(DEFAULT_CHILD_LIMIT);
+        let offset = page.child_offset;
+        let cap = page.summary_max_chars.unwrap_or(DEFAULT_SUMMARY_MAX_CHARS);
+
+        // Parents are few — return all (capped), no paging.
         let parents = self
             .ltm
             .get_parents(id)?
             .iter()
-            .map(NodeView::from)
+            .map(|n| capped(NodeView::from(n), cap))
             .collect();
-        let children = self
-            .ltm
-            .get_children(id)?
+
+        let all_children = self.ltm.get_children(id)?;
+        let child_count = all_children.len();
+        let children = all_children
             .iter()
-            .map(NodeView::from)
+            .skip(offset)
+            .take(limit)
+            .map(|n| capped(NodeView::from(n), cap))
             .collect();
-        let leaves = self
-            .ltm
-            .get_child_leaves(id)?
+
+        let all_leaves = self.ltm.get_child_leaves(id)?;
+        let leaf_count = all_leaves.len();
+        let leaves = all_leaves
             .into_iter()
+            .skip(offset)
+            .take(limit)
             .map(|l| LeafRef {
                 data_id: l.data_id,
                 provenance: l.provenance,
             })
             .collect();
+
         Ok(Some(NodeDetail {
-            node: NodeView::from(&node),
+            node: capped(NodeView::from(&node), cap),
             parents,
             children,
             leaves,
+            child_count,
+            leaf_count,
         }))
     }
 
@@ -133,6 +199,16 @@ impl IntrospectionService {
             ltm_branch,
             stm_node_count: self.stm.count_by_data_id(data_id)?,
         })
+    }
+
+    /// Placement calibration: nearest-concept distance for a sample of document
+    /// leaves (read-only, no LLM). Used to tune the placement threshold to real
+    /// embedding distances rather than a guessed value.
+    pub fn placement_debug(
+        &self,
+        sample: usize,
+    ) -> Result<Vec<crate::domain::ltm::PlacementProbe>> {
+        self.ltm.placement_calibration(sample)
     }
 
     /// A compact health summary.
@@ -241,13 +317,25 @@ mod tests {
     #[test]
     fn test_stm_list() {
         let f = fixture();
-        let all = f.svc.stm_list(10, None).unwrap();
+        let all = f.svc.stm_list(10, 0, None, None).unwrap();
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].fact, "metro doc");
         assert_eq!(all[0].data_id.as_deref(), Some("doc_1"));
 
         // Filtering by a status with no rows yields nothing.
-        assert!(f.svc.stm_list(10, Some("archived")).unwrap().is_empty());
+        assert!(
+            f.svc
+                .stm_list(10, 0, Some("archived"), None)
+                .unwrap()
+                .is_empty()
+        );
+
+        // Substring filter matches the fact text; a non-match yields nothing.
+        assert_eq!(f.svc.stm_list(10, 0, None, Some("metro")).unwrap().len(), 1);
+        assert!(f.svc.stm_list(10, 0, None, Some("zzz")).unwrap().is_empty());
+
+        // Offset past the single row yields nothing (pagination).
+        assert!(f.svc.stm_list(10, 1, None, None).unwrap().is_empty());
     }
 
     #[test]
@@ -263,12 +351,22 @@ mod tests {
 
         // inspect the inbox: the leaf is a child; it has no concept parents shown
         // beyond the root.
-        let detail = f.svc.inspect_node(f.inbox).unwrap().expect("inbox exists");
+        let full = LeafPage {
+            child_limit: None,
+            child_offset: 0,
+            summary_max_chars: None,
+        };
+        let detail = f
+            .svc
+            .inspect_node(f.inbox, full)
+            .unwrap()
+            .expect("inbox exists");
         assert!(detail.children.iter().any(|c| c.id == f.leaf));
         assert_eq!(detail.leaves.len(), 1, "inbox holds the document leaf");
         assert_eq!(detail.leaves[0].data_id, "doc_1");
+        assert_eq!(detail.leaf_count, 1);
 
-        assert!(f.svc.inspect_node(99999).unwrap().is_none());
+        assert!(f.svc.inspect_node(99999, full).unwrap().is_none());
     }
 
     /// trace_dataId finds the document in BOTH LTM (leaf + branch) and STM.

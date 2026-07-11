@@ -482,7 +482,7 @@ mod tests {
         let h = harness();
         let outcome = h
             .write
-            .handle(&remember_stm("cmd_1", "Reza prefers morning meetings"))
+            .handle(&remember_stm("cmd_1", "User prefers morning meetings"))
             .await
             .unwrap();
         assert_eq!(outcome, WriteOutcome::RememberedStm);
@@ -597,7 +597,7 @@ mod tests {
     #[tokio::test]
     async fn duplicate_command_id_is_skipped() {
         let h = harness();
-        let cmd = remember_stm("cmd_dup", "Reza likes cycling");
+        let cmd = remember_stm("cmd_dup", "User likes cycling");
 
         let first = h.write.handle(&cmd).await.unwrap();
         assert_eq!(first, WriteOutcome::RememberedStm);

@@ -218,8 +218,9 @@ mod tests {
         assert_eq!(m.stm_decay_histogram[1], 1, "0.3 in bin 1");
         assert!(m.stm_db_bytes > 0);
 
-        // LTM: 6 spine + 1 leaf = 7 nodes; one inbox doc; tree height >= 2.
-        assert_eq!(m.ltm_tree_nodes, 7);
+        // LTM: 12 spine (root + 10 branches + inbox) + 1 leaf = 13 nodes; one
+        // inbox doc; tree height >= 2.
+        assert_eq!(m.ltm_tree_nodes, 13);
         assert_eq!(m.ltm_leaves, 1);
         assert_eq!(m.ltm_inbox_docs, 1);
         assert_eq!(m.ltm_orphan_leaves, 0, "the leaf has a parent");

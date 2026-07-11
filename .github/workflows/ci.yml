@@ -33,8 +33,16 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-      - name: Run Clippy
+      # Standalone (default) build — the published binaries; no Kafka/rdkafka.
+      - name: Clippy (standalone)
         run: cargo clippy --all-targets -- -D warnings
 
-      - name: Run tests
+      - name: Test (standalone)
         run: cargo test --verbose
+
+      # Full daemon build — the JARVIS Docker image; enables the `kafka` feature.
+      - name: Clippy (kafka)
+        run: cargo clippy --all-targets --features kafka -- -D warnings
+
+      - name: Test (kafka)
+        run: cargo test --features kafka --verbose

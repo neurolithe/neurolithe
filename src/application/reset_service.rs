@@ -320,6 +320,39 @@ mod tests {
         assert!(h.ltm.get_node_by_data_id("grp_1").unwrap().is_some());
     }
 
+    /// After a hard reset the re-seeded spine is un-embedded (so a document would
+    /// fall to the inbox); once the daemon's post-reset step embeds it, a
+    /// replayed document files under a concept. Regression guard: a reset must
+    /// not silently re-break placement (field-report §3).
+    #[tokio::test]
+    async fn test_hard_reset_then_embed_spine_files_under_concept() {
+        use crate::application::ingestion::IngestOutcome;
+        use crate::application::ltm_placement::embed_spine_concepts;
+
+        let h = harness();
+        h.reset.hard_reset(TOKEN).unwrap();
+
+        // Un-embedded spine → the first replayed doc has no concept to match.
+        let before = h.ingest.ingest(&event("grp_before")).await.unwrap();
+        assert!(
+            matches!(before, IngestOutcome::Ingested { matched: false, .. }),
+            "without spine vectors a document falls to the inbox"
+        );
+
+        // The daemon's post-hard-reset step: embed the curated spine.
+        let ltm_dyn: Arc<dyn LtmRepository> = h.ltm.clone();
+        let llm_dyn: Arc<dyn LlmClient> = Arc::new(StubLlm);
+        let n = embed_spine_concepts(&ltm_dyn, &llm_dyn, DIM).await.unwrap();
+        assert!(n > 0, "spine concepts were embedded");
+
+        // Now a document matches a concept instead of the inbox.
+        let after = h.ingest.ingest(&event("grp_after")).await.unwrap();
+        assert!(
+            matches!(after, IngestOutcome::Ingested { matched: true, .. }),
+            "after embedding, a document files under a concept"
+        );
+    }
+
     /// Hard reset with the wrong token is refused and changes nothing.
     #[tokio::test]
     async fn test_hard_reset_wrong_token_refused() {

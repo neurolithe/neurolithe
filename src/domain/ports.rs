@@ -110,12 +110,17 @@ pub trait MemoryRepository {
     /// CT-scan statistics for the STM store (slice 9).
     fn stm_stats(&self) -> Result<StmStats>;
 
-    /// List STM facts (most-relevant first) for introspection, optionally
-    /// filtered by status (`active`/`archived`).
+    /// List STM facts (most-relevant first) for introspection, with pagination
+    /// (`limit`/`offset`), an optional status filter (`active`/`archived`), and
+    /// an optional case-insensitive substring filter on the fact text
+    /// (`contains`) so a client can find facts without pulling the whole store
+    /// (field-report §5).
     fn list_node_summaries(
         &self,
         limit: usize,
+        offset: usize,
         status: Option<&str>,
+        contains: Option<&str>,
     ) -> Result<Vec<StmNodeSummary>>;
 
     /// How many STM nodes carry a given `dataId` (for `trace_dataId`).

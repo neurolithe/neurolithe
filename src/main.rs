@@ -10,9 +10,20 @@ use crate::infrastructure::config::AppConfig;
 fn main() -> anyhow::Result<()> {
     let config = AppConfig::load()?;
 
-    // `neurolithe mcp` serves only the MCP tools over stdio (for a client
-    // session that shares the live stores); no args runs the full daemon.
+    // `neurolithe mcp` serves the MCP tools over stdio — the standalone default.
+    // With the `kafka` feature, any other invocation runs the full daemon
+    // (feeder + consumers + schedulers). A standalone build has no daemon.
     let mcp_only = std::env::args().nth(1).as_deref() == Some("mcp");
+
+    // Standalone build: the daemon does not exist — only the MCP server.
+    #[cfg(not(feature = "kafka"))]
+    if !mcp_only {
+        eprintln!(
+            "This is a standalone NeuroLithe build (no Kafka daemon).\n\
+             Start the MCP server with:  neurolithe mcp"
+        );
+        std::process::exit(2);
+    }
 
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -23,6 +34,13 @@ fn main() -> anyhow::Result<()> {
     } else {
         // Full daemon on a single-threaded runtime + LocalSet (the SQLite-backed
         // services are !Sync; the loops are !Send and run cooperatively).
-        local.block_on(&rt, crate::daemon::run(config))
+        #[cfg(feature = "kafka")]
+        {
+            local.block_on(&rt, crate::daemon::run(config))
+        }
+        #[cfg(not(feature = "kafka"))]
+        {
+            unreachable!("standalone non-mcp invocation exits above")
+        }
     }
 }
