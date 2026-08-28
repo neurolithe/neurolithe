@@ -143,7 +143,7 @@ can reconstruct what it just did.
 
 - First release.
 
-[0.2.0]: https://github.com/neurolithe/neurolithe/releases/tag/v0.2.0
-[0.1.2]: https://github.com/neurolithe/neurolithe/releases/tag/v0.1.2
-[0.1.1]: https://github.com/neurolithe/neurolithe/releases/tag/v0.1.1
-[0.1.0]: https://github.com/neurolithe/neurolithe/releases/tag/v0.1.0
+[0.2.0]: https://github.com/rezangit/neurolithe/releases/tag/v0.2.0
+[0.1.2]: https://github.com/rezangit/neurolithe/releases/tag/v0.1.2
+[0.1.1]: https://github.com/rezangit/neurolithe/releases/tag/v0.1.1
+[0.1.0]: https://github.com/rezangit/neurolithe/releases/tag/v0.1.0

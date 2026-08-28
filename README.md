@@ -10,9 +10,9 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/neurolithe/neurolithe/actions"><img src="https://img.shields.io/github/actions/workflow/status/neurolithe/neurolithe/ci.yml?branch=master&color=cyan" alt="Build Status"></a>
-  <a href="https://github.com/neurolithe/neurolithe/releases"><img src="https://img.shields.io/github/v/release/neurolithe/neurolithe?color=cyan" alt="Release"></a>
-  <a href="https://github.com/neurolithe/neurolithe/blob/master/LICENSE"><img src="https://img.shields.io/badge/License-MIT-cyan.svg" alt="License"></a>
+  <a href="https://github.com/rezangit/neurolithe/actions"><img src="https://img.shields.io/github/actions/workflow/status/rezangit/neurolithe/ci.yml?branch=master&color=cyan" alt="Build Status"></a>
+  <a href="https://github.com/rezangit/neurolithe/releases"><img src="https://img.shields.io/github/v/release/rezangit/neurolithe?color=cyan" alt="Release"></a>
+  <a href="https://github.com/rezangit/neurolithe/blob/master/LICENSE"><img src="https://img.shields.io/badge/License-MIT-cyan.svg" alt="License"></a>
   <a href="https://docs.neurolithe.com"><img src="https://img.shields.io/badge/docs-neurolithe.com-cyan.svg" alt="Docs"></a>
   <a href="https://neurolithe.com"><img src="https://img.shields.io/badge/website-neurolithe.com-cyan.svg" alt="Website"></a>
 </p>
@@ -29,28 +29,12 @@ Run it two ways: as an embedded **MCP server** over STDIO (drop-in agent memory)
 
 ### 1. Installation
 
-**macOS / Linux:**
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/neurolithe/neurolithe/master/install.sh | bash
-```
-
-> [!NOTE]
-> This automatically downloads the latest binary (macOS Intel/Apple-Silicon, Linux x86_64), creates config files, prompts for your LLM API key, and provides a ready-to-use MCP configuration snippet.
-
-> [!NOTE]
-> The published binaries (macOS Intel/Apple-Silicon, Linux x86_64, **Windows**)
-> are the **standalone** build — just the embedded stores + MCP server, no Kafka.
-> Nothing to install or run besides the binary.
-
-<details>
-<summary><b>Install from source</b></summary>
-<br>
+**Build from source** (recommended — this is the current code):
 
 Ensure you have [Rust](https://rustup.rs/) installed:
 
 ```bash
-git clone https://github.com/neurolithe/neurolithe.git
+git clone https://github.com/rezangit/neurolithe.git
 cd neurolithe
 cargo install --path .                    # standalone MCP server (default)
 cargo install --path . --features kafka   # + the Kafka event-driven daemon
@@ -58,6 +42,26 @@ cargo install --path . --features kafka   # + the Kafka event-driven daemon
 
 The default build needs no Kafka/`librdkafka` toolchain — only a C compiler for
 bundled SQLite. Add `--features kafka` only if you want the daemon.
+
+<details>
+<summary><b>Pre-built binaries (frozen at v0.2.0)</b></summary>
+<br>
+
+Automated release builds have been retired, so the published binaries stay at
+**v0.2.0** and will not track `master`. They remain available if you want a
+zero-toolchain start:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/rezangit/neurolithe/master/install.sh | bash
+```
+
+This downloads the latest *published* binary (macOS Intel/Apple-Silicon, Linux
+x86_64), creates config files, prompts for your LLM API key, and writes a
+ready-to-use MCP config snippet.
+
+The published binaries (macOS Intel/Apple-Silicon, Linux x86_64, **Windows**)
+are the **standalone** build — just the embedded stores + MCP server, no Kafka.
+Nothing to install or run besides the binary.
 
 </details>
 

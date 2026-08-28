@@ -9,13 +9,13 @@ Get NeuroLithe running in under 5 minutes.
 **macOS / Linux:**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/neurolithe/neurolithe/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/rezangit/neurolithe/main/install.sh | bash
 ```
 
 **Windows (PowerShell):**
 
 ```powershell
-irm https://raw.githubusercontent.com/neurolithe/neurolithe/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/rezangit/neurolithe/main/install.ps1 | iex
 ```
 
 This will automatically:
@@ -29,7 +29,7 @@ This will automatically:
 ### From Source
 
 ```bash
-git clone https://github.com/neurolithe/neurolithe.git
+git clone https://github.com/rezangit/neurolithe.git
 cd neurolithe
 cargo build --release
 ```
