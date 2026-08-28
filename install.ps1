@@ -1,12 +1,12 @@
 # ──────────────────────────────────────────────────────────────
 #  NeuroLithe Installer for Windows
-#  One-line install: irm https://raw.githubusercontent.com/neurolithe/neurolithe/master/install.ps1 | iex
+#  One-line install: irm https://raw.githubusercontent.com/rezangit/neurolithe/master/install.ps1 | iex
 # ──────────────────────────────────────────────────────────────
 
 $ErrorActionPreference = "Stop"
 
 $Version = if ($env:NEUROLITHE_VERSION) { $env:NEUROLITHE_VERSION } else { "latest" }
-$GitHubRepo = "neurolithe/neurolithe"
+$GitHubRepo = "rezangit/neurolithe"
 $InstallDir = if ($env:NEUROLITHE_INSTALL_DIR) { $env:NEUROLITHE_INSTALL_DIR } else { "$env:USERPROFILE\.neurolithe" }
 $BinDir = "$InstallDir\bin"
 $DataDir = "$InstallDir\data"

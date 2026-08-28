@@ -3,11 +3,11 @@ set -euo pipefail
 
 # ──────────────────────────────────────────────────────────────
 #  NeuroLithe Installer
-#  One-line install: curl -fsSL https://raw.githubusercontent.com/neurolithe/neurolithe/master/install.sh | bash
+#  One-line install: curl -fsSL https://raw.githubusercontent.com/rezangit/neurolithe/master/install.sh | bash
 # ──────────────────────────────────────────────────────────────
 
 VERSION="${NEUROLITHE_VERSION:-latest}"
-GITHUB_REPO="neurolithe/neurolithe"
+GITHUB_REPO="rezangit/neurolithe"
 INSTALL_DIR="${NEUROLITHE_INSTALL_DIR:-$HOME/.neurolithe}"
 BIN_DIR="$INSTALL_DIR/bin"
 CONFIG_DIR="$INSTALL_DIR"
